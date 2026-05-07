@@ -60,6 +60,8 @@ count_deps.py
 project_overhaul_prompt.md
 .codex/
 .context/
+.codeartsdoer/temp/
+.arts/
 
 # Local runtime state
 .deepseek/
