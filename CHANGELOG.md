@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.16] - 2026-05-07
+
+### Added
+- **OpenCode Go provider support** — new `opencode-go` provider targeting the
+  OpenCode Go gateway at `https://opencode.ai/zen/go/v1`. Available models:
+  glm-5, glm-5.1, kimi-k2.5, kimi-k2.6, deepseek-v4-pro, deepseek-v4-flash,
+  mimo-v2-pro, mimo-v2-omni, mimo-v2.5-pro, mimo-v2.5, minimax-m2.5,
+  minimax-m2.7, qwen3.5-plus, qwen3.6-plus. Auth via `OPENCODE_GO_API_KEY`
+  or `deepseek auth set --provider opencode-go --api-key <KEY>`.
+
 ## [0.8.13] - 2026-05-05
 
 A stabilization release for DeepSeek V4 runtime and TUI reliability. The

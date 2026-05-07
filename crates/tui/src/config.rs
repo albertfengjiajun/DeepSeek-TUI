@@ -37,6 +37,8 @@ pub const DEFAULT_SGLANG_BASE_URL: &str = "http://localhost:30000/v1";
 pub const DEFAULT_VLLM_MODEL: &str = "deepseek-ai/DeepSeek-V4-Pro";
 pub const DEFAULT_VLLM_FLASH_MODEL: &str = "deepseek-ai/DeepSeek-V4-Flash";
 pub const DEFAULT_VLLM_BASE_URL: &str = "http://localhost:8000/v1";
+pub const DEFAULT_OPENCODE_GO_MODEL: &str = "deepseek-v4-pro";
+pub const DEFAULT_OPENCODE_GO_BASE_URL: &str = "https://opencode.ai/zen/go/v1";
 pub const DEFAULT_DEEPSEEKCN_BASE_URL: &str = "https://api.deepseeki.com";
 const API_KEYRING_SENTINEL: &str = "__KEYRING__";
 pub const COMMON_DEEPSEEK_MODELS: &[&str] = &[
@@ -59,6 +61,7 @@ pub enum ApiProvider {
     Fireworks,
     Sglang,
     Vllm,
+    OpencodeGo,
 }
 
 impl ApiProvider {
@@ -75,6 +78,7 @@ impl ApiProvider {
             "fireworks" | "fireworks-ai" => Some(Self::Fireworks),
             "sglang" | "sg-lang" => Some(Self::Sglang),
             "vllm" | "v-llm" => Some(Self::Vllm),
+            "opencode-go" | "opencode_go" => Some(Self::OpencodeGo),
             _ => None,
         }
     }
@@ -90,6 +94,7 @@ impl ApiProvider {
             Self::Fireworks => "fireworks",
             Self::Sglang => "sglang",
             Self::Vllm => "vllm",
+            Self::OpencodeGo => "opencode-go",
         }
     }
 
@@ -105,6 +110,7 @@ impl ApiProvider {
             Self::Fireworks => "Fireworks AI",
             Self::Sglang => "SGLang",
             Self::Vllm => "vLLM",
+            Self::OpencodeGo => "OpenCode Go",
         }
     }
 
@@ -120,6 +126,7 @@ impl ApiProvider {
             Self::Fireworks,
             Self::Sglang,
             Self::Vllm,
+            Self::OpencodeGo,
         ]
     }
 }
@@ -165,6 +172,10 @@ pub enum RequestPayloadMode {
 /// in the API payload (after normalization / provider-specific mapping).
 #[must_use]
 pub fn provider_capability(provider: ApiProvider, resolved_model: &str) -> ProviderCapability {
+    if provider == ApiProvider::OpencodeGo {
+        return opencode_go_capability(resolved_model);
+    }
+
     let model_lower = resolved_model.to_ascii_lowercase();
     let is_v4_pro = model_lower.contains("v4-pro") || model_lower == "deepseek-v4pro";
     let is_v4_flash = model_lower.contains("v4-flash")
@@ -211,6 +222,55 @@ pub fn provider_capability(provider: ApiProvider, resolved_model: &str) -> Provi
     }
 }
 
+fn opencode_go_capability(model: &str) -> ProviderCapability {
+    ProviderCapability {
+        provider: ApiProvider::OpencodeGo,
+        resolved_model: model.to_string(),
+        context_window: opencode_go_context_window(model),
+        max_output: opencode_go_max_output(model),
+        thinking_supported: opencode_go_thinking_supported(model),
+        cache_telemetry_supported: matches!(model, "deepseek-v4-pro" | "deepseek-v4-flash"),
+        request_payload_mode: RequestPayloadMode::ChatCompletions,
+    }
+}
+
+fn opencode_go_context_window(model: &str) -> u32 {
+    match model {
+        "deepseek-v4-pro" | "deepseek-v4-flash" => 1_048_576,
+        "mimo-v2-pro" | "mimo-v2-omni" | "mimo-v2.5-pro" | "mimo-v2.5" => 1_048_576,
+        "qwen3.6-plus" | "qwen3.5-plus" => 1_048_576,
+        "kimi-k2.5" | "kimi-k2.6" => 262_144,
+        "glm-5" | "glm-5.1" => 204_800,
+        "minimax-m2.7" => 204_800,
+        "minimax-m2.5" => 196_608,
+        _ if model.starts_with("deepseek-v4") => 1_048_576,
+        _ if model.starts_with("mimo-") => 1_048_576,
+        _ if model.starts_with("qwen") => 1_048_576,
+        _ if model.starts_with("kimi-") => 262_144,
+        _ if model.starts_with("glm-") => 204_800,
+        _ if model.starts_with("minimax-") => 204_800,
+        _ => 131_072,
+    }
+}
+
+fn opencode_go_max_output(model: &str) -> u32 {
+    match model {
+        "deepseek-v4-pro" | "deepseek-v4-flash" => 393_216,
+        "mimo-v2-pro" | "mimo-v2.5-pro" => 131_072,
+        "mimo-v2-omni" | "mimo-v2.5" => 65_536,
+        "glm-5" | "glm-5.1" => 131_072,
+        "minimax-m2.7" => 131_072,
+        "minimax-m2.5" => 32_768,
+        "kimi-k2.6" => 98_304,
+        "qwen3.6-plus" | "qwen3.5-plus" => 65_536,
+        _ => 65_536,
+    }
+}
+
+fn opencode_go_thinking_supported(model: &str) -> bool {
+    !matches!(model, "mimo-v2-omni" | "mimo-v2.5")
+}
+
 /// Canonicalize compact DeepSeek model aliases to stable IDs.
 ///
 /// Already-valid model IDs pass through unchanged. Only the compact
@@ -241,7 +301,10 @@ pub fn normalize_model_name(model: &str) -> Option<String> {
     }
 
     let normalized = trimmed.to_ascii_lowercase();
-    if !normalized.starts_with("deepseek") && !normalized.contains("/deepseek") {
+    if !normalized.starts_with("deepseek")
+        && !normalized.contains("/deepseek")
+        && !normalized.starts_with("opencode-go/")
+    {
         return None;
     }
 
@@ -916,6 +979,8 @@ pub struct ProvidersConfig {
     pub sglang: ProviderConfig,
     #[serde(default)]
     pub vllm: ProviderConfig,
+    #[serde(default)]
+    pub opencode_go: ProviderConfig,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -975,7 +1040,7 @@ impl Config {
             && ApiProvider::parse(provider).is_none()
         {
             anyhow::bail!(
-                "Invalid provider '{provider}': expected deepseek, deepseek-cn, nvidia-nim, openrouter, novita, fireworks, sglang, or vllm."
+                "Invalid provider '{provider}': expected deepseek, deepseek-cn, nvidia-nim, openrouter, novita, fireworks, sglang, vllm, or opencode-go."
             );
         }
         if let Some(ref key) = self.api_key
@@ -1094,6 +1159,7 @@ impl Config {
             ApiProvider::Fireworks => &providers.fireworks,
             ApiProvider::Sglang => &providers.sglang,
             ApiProvider::Vllm => &providers.vllm,
+            ApiProvider::OpencodeGo => &providers.opencode_go,
         })
     }
 
@@ -1130,6 +1196,7 @@ impl Config {
             ApiProvider::Fireworks => DEFAULT_FIREWORKS_MODEL,
             ApiProvider::Sglang => DEFAULT_SGLANG_MODEL,
             ApiProvider::Vllm => DEFAULT_VLLM_MODEL,
+            ApiProvider::OpencodeGo => DEFAULT_OPENCODE_GO_MODEL,
         }
         .to_string()
     }
@@ -1156,7 +1223,8 @@ impl Config {
             | ApiProvider::Novita
             | ApiProvider::Fireworks
             | ApiProvider::Sglang
-            | ApiProvider::Vllm => None,
+            | ApiProvider::Vllm
+            | ApiProvider::OpencodeGo => None,
         };
         let base = provider_base.or(root_base).unwrap_or_else(|| {
             match provider {
@@ -1168,6 +1236,7 @@ impl Config {
                 ApiProvider::Fireworks => DEFAULT_FIREWORKS_BASE_URL,
                 ApiProvider::Sglang => DEFAULT_SGLANG_BASE_URL,
                 ApiProvider::Vllm => DEFAULT_VLLM_BASE_URL,
+                ApiProvider::OpencodeGo => DEFAULT_OPENCODE_GO_BASE_URL,
             }
             .to_string()
         });
@@ -1192,6 +1261,7 @@ impl Config {
             ApiProvider::Fireworks => "fireworks",
             ApiProvider::Sglang => "sglang",
             ApiProvider::Vllm => "vllm",
+            ApiProvider::OpencodeGo => "opencode-go",
         };
 
         // 0. Explicit in-memory override (set by onboarding / provider
@@ -1251,6 +1321,10 @@ impl Config {
             ApiProvider::Fireworks => anyhow::bail!(
                 "Fireworks AI API key not found. Run 'deepseek auth set --provider fireworks', \
                  set FIREWORKS_API_KEY, or add [providers.fireworks] api_key in ~/.deepseek/config.toml."
+            ),
+            ApiProvider::OpencodeGo => anyhow::bail!(
+                "OpenCode Go API key not found. Run 'deepseek auth set --provider opencode-go', \
+                 set OPENCODE_GO_API_KEY, or add [providers.opencode_go] api_key in ~/.deepseek/config.toml."
             ),
             // Self-hosted SGLang deployments commonly run without auth on
             // localhost. Return an empty key and let the client omit the
@@ -1707,6 +1781,16 @@ fn apply_env_overrides(config: &mut Config) {
             .vllm
             .base_url = Some(value);
     }
+    if matches!(config.api_provider(), ApiProvider::OpencodeGo)
+        && let Ok(value) = std::env::var("OPENCODE_GO_BASE_URL")
+        && !value.trim().is_empty()
+    {
+        config
+            .providers
+            .get_or_insert_with(ProvidersConfig::default)
+            .opencode_go
+            .base_url = Some(value);
+    }
     if matches!(config.api_provider(), ApiProvider::Sglang)
         && let Ok(value) = std::env::var("SGLANG_MODEL")
     {
@@ -1714,6 +1798,11 @@ fn apply_env_overrides(config: &mut Config) {
     }
     if matches!(config.api_provider(), ApiProvider::Vllm)
         && let Ok(value) = std::env::var("VLLM_MODEL")
+    {
+        config.default_text_model = Some(value);
+    }
+    if matches!(config.api_provider(), ApiProvider::OpencodeGo)
+        && let Ok(value) = std::env::var("OPENCODE_GO_MODEL")
     {
         config.default_text_model = Some(value);
     }
@@ -1941,6 +2030,11 @@ fn normalize_model_config(config: &mut Config) {
         {
             providers.vllm.model = Some(normalized);
         }
+        if let Some(model) = providers.opencode_go.model.as_deref()
+            && let Some(normalized) = normalize_model_for_provider(ApiProvider::OpencodeGo, model)
+        {
+            providers.opencode_go.model = Some(normalized);
+        }
     }
 }
 
@@ -1968,6 +2062,10 @@ fn model_for_provider(provider: ApiProvider, normalized: String) -> String {
         (ApiProvider::Sglang, "deepseek-v4-flash") => DEFAULT_SGLANG_FLASH_MODEL.to_string(),
         (ApiProvider::Vllm, "deepseek-v4-pro") => DEFAULT_VLLM_MODEL.to_string(),
         (ApiProvider::Vllm, "deepseek-v4-flash") => DEFAULT_VLLM_FLASH_MODEL.to_string(),
+        (ApiProvider::OpencodeGo, model) if model.starts_with("opencode-go/") => model
+            .strip_prefix("opencode-go/")
+            .unwrap_or(model)
+            .to_string(),
         _ => normalized,
     }
 }
@@ -2109,6 +2207,7 @@ fn merge_providers(
             fireworks: merge_provider_config(base.fireworks, override_cfg.fireworks),
             sglang: merge_provider_config(base.sglang, override_cfg.sglang),
             vllm: merge_provider_config(base.vllm, override_cfg.vllm),
+            opencode_go: merge_provider_config(base.opencode_go, override_cfg.opencode_go),
         }),
     }
 }
@@ -2492,6 +2591,9 @@ pub fn active_provider_has_env_api_key(config: &Config) -> bool {
         }
         ApiProvider::Sglang => std::env::var("SGLANG_API_KEY").is_ok_and(|k| !k.trim().is_empty()),
         ApiProvider::Vllm => std::env::var("VLLM_API_KEY").is_ok_and(|k| !k.trim().is_empty()),
+        ApiProvider::OpencodeGo => {
+            std::env::var("OPENCODE_GO_API_KEY").is_ok_and(|k| !k.trim().is_empty())
+        }
     }
 }
 
@@ -2513,6 +2615,7 @@ pub fn has_api_key_for(config: &Config, provider: ApiProvider) -> bool {
         ApiProvider::Fireworks => "FIREWORKS_API_KEY",
         ApiProvider::Sglang => "SGLANG_API_KEY",
         ApiProvider::Vllm => "VLLM_API_KEY",
+        ApiProvider::OpencodeGo => "OPENCODE_GO_API_KEY",
     };
     if std::env::var(env_var).is_ok_and(|k| !k.trim().is_empty()) {
         return true;
@@ -2576,6 +2679,7 @@ pub fn save_api_key_for(provider: ApiProvider, api_key: &str) -> Result<PathBuf>
         ApiProvider::Fireworks => "providers.fireworks",
         ApiProvider::Sglang => "providers.sglang",
         ApiProvider::Vllm => "providers.vllm",
+        ApiProvider::OpencodeGo => "providers.opencode_go",
     };
 
     // Parse existing TOML (or start fresh) so we can edit the right table
@@ -2608,6 +2712,7 @@ pub fn save_api_key_for(provider: ApiProvider, api_key: &str) -> Result<PathBuf>
         ApiProvider::Fireworks => "fireworks",
         ApiProvider::Sglang => "sglang",
         ApiProvider::Vllm => "vllm",
+        ApiProvider::OpencodeGo => "opencode_go",
     };
     let entry = providers
         .entry(key_inside.to_string())
@@ -2726,6 +2831,9 @@ mod tests {
         vllm_api_key: Option<OsString>,
         vllm_base_url: Option<OsString>,
         vllm_model: Option<OsString>,
+        opencode_go_api_key: Option<OsString>,
+        opencode_go_base_url: Option<OsString>,
+        opencode_go_model: Option<OsString>,
     }
 
     impl EnvGuard {
@@ -2759,6 +2867,9 @@ mod tests {
             let vllm_api_key_prev = env::var_os("VLLM_API_KEY");
             let vllm_base_url_prev = env::var_os("VLLM_BASE_URL");
             let vllm_model_prev = env::var_os("VLLM_MODEL");
+            let opencode_go_api_key_prev = env::var_os("OPENCODE_GO_API_KEY");
+            let opencode_go_base_url_prev = env::var_os("OPENCODE_GO_BASE_URL");
+            let opencode_go_model_prev = env::var_os("OPENCODE_GO_MODEL");
             // Safety: test-only environment mutation guarded by a global mutex.
             unsafe {
                 env::set_var("HOME", &home_str);
@@ -2787,6 +2898,9 @@ mod tests {
                 env::remove_var("VLLM_API_KEY");
                 env::remove_var("VLLM_BASE_URL");
                 env::remove_var("VLLM_MODEL");
+                env::remove_var("OPENCODE_GO_API_KEY");
+                env::remove_var("OPENCODE_GO_BASE_URL");
+                env::remove_var("OPENCODE_GO_MODEL");
             }
             Self {
                 home: home_prev,
@@ -2815,6 +2929,9 @@ mod tests {
                 vllm_api_key: vllm_api_key_prev,
                 vllm_base_url: vllm_base_url_prev,
                 vllm_model: vllm_model_prev,
+                opencode_go_api_key: opencode_go_api_key_prev,
+                opencode_go_base_url: opencode_go_base_url_prev,
+                opencode_go_model: opencode_go_model_prev,
             }
         }
     }
@@ -2852,6 +2969,9 @@ mod tests {
                 Self::restore_var("VLLM_API_KEY", self.vllm_api_key.take());
                 Self::restore_var("VLLM_BASE_URL", self.vllm_base_url.take());
                 Self::restore_var("VLLM_MODEL", self.vllm_model.take());
+                Self::restore_var("OPENCODE_GO_API_KEY", self.opencode_go_api_key.take());
+                Self::restore_var("OPENCODE_GO_BASE_URL", self.opencode_go_base_url.take());
+                Self::restore_var("OPENCODE_GO_MODEL", self.opencode_go_model.take());
             }
         }
     }
@@ -4324,5 +4444,76 @@ model = "deepseek-v4-pro"
         let json = serde_json::to_value(&cap).unwrap();
         let deserialized: ProviderCapability = serde_json::from_value(json).unwrap();
         assert_eq!(cap, deserialized);
+    }
+
+    #[test]
+    fn parse_opencode_go_aliases() {
+        assert_eq!(
+            ApiProvider::parse("opencode-go"),
+            Some(ApiProvider::OpencodeGo)
+        );
+        assert_eq!(
+            ApiProvider::parse("opencode_go"),
+            Some(ApiProvider::OpencodeGo)
+        );
+    }
+
+    #[test]
+    fn opencode_go_as_str() {
+        assert_eq!(ApiProvider::OpencodeGo.as_str(), "opencode-go");
+    }
+
+    #[test]
+    fn opencode_go_display_name() {
+        assert_eq!(ApiProvider::OpencodeGo.display_name(), "OpenCode Go");
+    }
+
+    #[test]
+    fn opencode_go_default_model_and_base_url() {
+        assert_eq!(DEFAULT_OPENCODE_GO_MODEL, "deepseek-v4-pro");
+        assert_eq!(
+            DEFAULT_OPENCODE_GO_BASE_URL,
+            "https://opencode.ai/zen/go/v1"
+        );
+    }
+
+    #[test]
+    fn opencode_go_model_for_provider_strips_prefix() {
+        let result = model_for_provider(ApiProvider::OpencodeGo, "opencode-go/glm-5.1".to_string());
+        assert_eq!(result, "glm-5.1");
+    }
+
+    #[test]
+    fn opencode_go_capability_v4_pro() {
+        let cap = provider_capability(ApiProvider::OpencodeGo, "deepseek-v4-pro");
+        assert_eq!(cap.provider, ApiProvider::OpencodeGo);
+        assert_eq!(cap.context_window, 1_048_576);
+        assert_eq!(cap.max_output, 393_216);
+        assert!(cap.thinking_supported);
+        assert!(cap.cache_telemetry_supported);
+    }
+
+    #[test]
+    fn opencode_go_capability_mimo_v2_omni() {
+        let cap = provider_capability(ApiProvider::OpencodeGo, "mimo-v2-omni");
+        assert_eq!(cap.context_window, 1_048_576);
+        assert_eq!(cap.max_output, 65_536);
+        assert!(!cap.thinking_supported);
+    }
+
+    #[test]
+    fn opencode_go_capability_glm5() {
+        let cap = provider_capability(ApiProvider::OpencodeGo, "glm-5");
+        assert_eq!(cap.context_window, 204_800);
+        assert_eq!(cap.max_output, 131_072);
+        assert!(cap.thinking_supported);
+    }
+
+    #[test]
+    fn opencode_go_capability_unknown_model() {
+        let cap = provider_capability(ApiProvider::OpencodeGo, "some-unknown-model");
+        assert_eq!(cap.context_window, 131_072);
+        assert_eq!(cap.max_output, 65_536);
+        assert!(cap.thinking_supported);
     }
 }

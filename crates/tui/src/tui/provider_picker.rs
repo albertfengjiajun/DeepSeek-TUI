@@ -93,6 +93,7 @@ impl ProviderPickerView {
             ApiProvider::Fireworks => "FIREWORKS_API_KEY",
             ApiProvider::Sglang => "SGLANG_API_KEY",
             ApiProvider::Vllm => "VLLM_API_KEY",
+            ApiProvider::OpencodeGo => "OPENCODE_GO_API_KEY",
         }
     }
 
@@ -376,7 +377,8 @@ mod tests {
                 "Novita AI",
                 "Fireworks AI",
                 "SGLang",
-                "vLLM"
+                "vLLM",
+                "OpenCode Go"
             ]
         );
     }
@@ -485,5 +487,16 @@ mod tests {
             picker.handle_key(key(KeyCode::Char(c)));
         }
         assert_eq!(picker.api_key_input, "abcdef");
+    }
+
+    #[test]
+    fn picker_includes_opencode_go() {
+        let config = Config::default();
+        let picker = ProviderPickerView::new(ApiProvider::Deepseek, &config);
+        let has_opencode_go = picker
+            .providers
+            .iter()
+            .any(|(p, _)| *p == ApiProvider::OpencodeGo);
+        assert!(has_opencode_go);
     }
 }

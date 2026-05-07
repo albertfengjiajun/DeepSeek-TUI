@@ -56,11 +56,12 @@ the legacy `deepseek login --api-key ...` alias) saves the key to
 to the TUI as `DEEPSEEK_MODEL`.
 
 For hosted or self-hosted DeepSeek V4 providers, set `provider = "nvidia-nim"`,
-`"fireworks"`, `"sglang"`, or `"vllm"` or pass `deepseek --provider <name>`. The facade
+`"fireworks"`, `"sglang"`, `"vllm"`, or `"opencode-go"` or pass `deepseek --provider <name>`. The facade
 saves provider credentials to the shared user config and forwards the resolved
 key, base URL, provider, and model to the TUI process. Use
 `deepseek auth set --provider nvidia-nim --api-key "YOUR_NVIDIA_API_KEY"` or
-`deepseek auth set --provider fireworks --api-key "YOUR_FIREWORKS_API_KEY"` to
+`deepseek auth set --provider fireworks --api-key "YOUR_FIREWORKS_API_KEY"` or
+`deepseek auth set --provider opencode-go --api-key "YOUR_OPENCODE_GO_API_KEY"` to
 save hosted-provider keys through the facade. SGLang and vLLM are self-hosted and can run
 without an API key by default.
 
@@ -104,6 +105,12 @@ default_text_model = "deepseek-ai/DeepSeek-V4-Pro"
 provider = "vllm"
 base_url = "http://localhost:8000/v1"
 default_text_model = "deepseek-ai/DeepSeek-V4-Pro"
+
+[profiles.opencode-go]
+provider = "opencode-go"
+api_key = "YOUR_OPENCODE_GO_API_KEY"
+base_url = "https://opencode.ai/zen/go/v1"
+default_text_model = "deepseek-v4-pro"
 ```
 
 Select a profile with:
@@ -119,7 +126,7 @@ These override config values:
 
 - `DEEPSEEK_API_KEY`
 - `DEEPSEEK_BASE_URL`
-- `DEEPSEEK_PROVIDER` (`deepseek|nvidia-nim|openrouter|novita|fireworks|sglang|vllm`)
+- `DEEPSEEK_PROVIDER` (`deepseek|nvidia-nim|openrouter|novita|fireworks|sglang|vllm|opencode-go`)
 - `DEEPSEEK_MODEL` or `DEEPSEEK_DEFAULT_TEXT_MODEL`
 - `NVIDIA_API_KEY` or `NVIDIA_NIM_API_KEY` (preferred when provider is `nvidia-nim`; falls back to `DEEPSEEK_API_KEY`)
 - `NVIDIA_NIM_BASE_URL`, `NIM_BASE_URL`, or `NVIDIA_BASE_URL`
@@ -132,6 +139,9 @@ These override config values:
 - `VLLM_BASE_URL`
 - `VLLM_MODEL`
 - `VLLM_API_KEY` (optional; many localhost vLLM servers do not require auth)
+- `OPENCODE_GO_API_KEY` (required when provider is `opencode-go`)
+- `OPENCODE_GO_BASE_URL` (optional; defaults to `https://opencode.ai/zen/go/v1`)
+- `OPENCODE_GO_MODEL` (optional; defaults to `deepseek-v4-pro`)
 - `DEEPSEEK_LOG_LEVEL` or `RUST_LOG` (`info`/`debug`/`trace` enables lightweight verbose logs)
 - `DEEPSEEK_SKILLS_DIR`
 - `DEEPSEEK_MCP_CONFIG`
@@ -305,10 +315,10 @@ If you are upgrading from older releases:
 
 ### Core keys (used by the TUI/engine)
 
-- `provider` (string, optional): `deepseek` (default), `deepseek-cn`, `nvidia-nim`, `openrouter`, `novita`, `fireworks`, `sglang`, or `vllm`. `deepseek-cn` uses DeepSeek's mainland China endpoint (`https://api.deepseeki.com`); `nvidia-nim` targets NVIDIA's NIM-hosted DeepSeek endpoints through `https://integrate.api.nvidia.com/v1`; `fireworks` targets `https://api.fireworks.ai/inference/v1`; `sglang` targets a self-hosted OpenAI-compatible endpoint, defaulting to `http://localhost:30000/v1`; `vllm` targets a self-hosted vLLM OpenAI-compatible endpoint, defaulting to `http://localhost:8000/v1`.
+- `provider` (string, optional): `deepseek` (default), `deepseek-cn`, `nvidia-nim`, `openrouter`, `novita`, `fireworks`, `sglang`, `vllm`, or `opencode-go`. `deepseek-cn` uses DeepSeek's mainland China endpoint (`https://api.deepseeki.com`); `nvidia-nim` targets NVIDIA's NIM-hosted DeepSeek endpoints through `https://integrate.api.nvidia.com/v1`; `fireworks` targets `https://api.fireworks.ai/inference/v1`; `sglang` targets a self-hosted OpenAI-compatible endpoint, defaulting to `http://localhost:30000/v1`; `vllm` targets a self-hosted vLLM OpenAI-compatible endpoint, defaulting to `http://localhost:8000/v1`; `opencode-go` targets the OpenCode Go gateway at `https://opencode.ai/zen/go/v1`.
 - `api_key` (string, required): must be non-empty (or set `DEEPSEEK_API_KEY`).
 - `base_url` (string, optional): defaults to `https://api.deepseek.com` for DeepSeek's OpenAI-compatible Chat Completions API, `https://api.deepseeki.com` for `provider = "deepseek-cn"`, or the provider-specific endpoint for hosted/self-hosted providers. `https://api.deepseek.com/v1` is also accepted for SDK compatibility; use `https://api.deepseek.com/beta` only for DeepSeek beta features such as strict tool mode, chat prefix completion, and FIM completion.
-- `default_text_model` (string, optional): defaults to `deepseek-v4-pro` for DeepSeek, `deepseek-ai/deepseek-v4-pro` for NVIDIA NIM, `accounts/fireworks/models/deepseek-v4-pro` for Fireworks, and `deepseek-ai/DeepSeek-V4-Pro` for SGLang. Current public DeepSeek IDs are `deepseek-v4-pro` and `deepseek-v4-flash`, both with 1M context windows and thinking mode enabled by default. Legacy `deepseek-chat` and `deepseek-reasoner` remain compatibility aliases for `deepseek-v4-flash`. Provider-specific mappings translate `deepseek-v4-pro` / `deepseek-v4-flash` to each provider's model ID where supported. Use `/models` or `deepseek models` to discover live IDs from your configured endpoint. `DEEPSEEK_MODEL` overrides this for a single process.
+- `default_text_model` (string, optional): defaults to `deepseek-v4-pro` for DeepSeek, `deepseek-ai/deepseek-v4-pro` for NVIDIA NIM, `accounts/fireworks/models/deepseek-v4-pro` for Fireworks, `deepseek-ai/DeepSeek-V4-Pro` for SGLang, and `deepseek-v4-pro` for OpenCode Go. Current public DeepSeek IDs are `deepseek-v4-pro` and `deepseek-v4-flash`, both with 1M context windows and thinking mode enabled by default. Legacy `deepseek-chat` and `deepseek-reasoner` remain compatibility aliases for `deepseek-v4-flash`. Provider-specific mappings translate `deepseek-v4-pro` / `deepseek-v4-flash` to each provider's model ID where supported. Use `/models` or `deepseek models` to discover live IDs from your configured endpoint. `DEEPSEEK_MODEL` overrides this for a single process.
 - `reasoning_effort` (string, optional): `off`, `low`, `medium`, `high`, or `max`; defaults to the configured UI tier. DeepSeek Platform receives top-level `thinking` / `reasoning_effort` fields. NVIDIA NIM receives equivalent settings through `chat_template_kwargs`.
 - `allow_shell` (bool, optional): defaults to `true` (sandboxed).
 - `approval_policy` (string, optional): `on-request`, `untrusted`, or `never`. Runtime `approval_mode` editing in `/config` also accepts `on-request` and `untrusted` aliases.

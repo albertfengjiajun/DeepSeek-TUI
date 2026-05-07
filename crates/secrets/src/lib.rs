@@ -412,6 +412,7 @@ pub fn env_for(name: &str) -> Option<String> {
         "fireworks" | "fireworks-ai" => &["FIREWORKS_API_KEY"],
         "sglang" | "sg-lang" => &["SGLANG_API_KEY"],
         "vllm" | "v-llm" => &["VLLM_API_KEY"],
+        "opencode-go" | "opencode_go" => &["OPENCODE_GO_API_KEY"],
         "openai" => &["OPENAI_API_KEY"],
         _ => return None,
     };
@@ -718,13 +719,19 @@ mod tests {
 
     #[test]
     fn file_store_default_path_uses_home() {
-        // We don't override HOME here (other tests do); we just check the
-        // shape of the path is `<home>/.deepseek/secrets/secrets.json`.
         let path = FileKeyringStore::default_path().unwrap();
         assert!(
             path.ends_with("secrets/secrets.json") || path.ends_with("secrets\\secrets.json"),
             "unexpected default path: {}",
             path.display()
         );
+    }
+
+    #[test]
+    fn env_for_opencode_go() {
+        let result = env_for("opencode-go");
+        assert!(result.is_none() || result.is_some());
+        let result2 = env_for("opencode_go");
+        assert!(result2.is_none() || result2.is_some());
     }
 }

@@ -226,6 +226,18 @@ pub fn context_window_for_model(model: &str) -> Option<u32> {
     if lower.contains("claude") {
         return Some(200_000);
     }
+    if lower.starts_with("glm-") {
+        return Some(204_800);
+    }
+    if lower.starts_with("kimi-") {
+        return Some(262_144);
+    }
+    if lower.starts_with("mimo-") {
+        return Some(1_048_576);
+    }
+    if lower.starts_with("minimax-") {
+        return Some(204_800);
+    }
     None
 }
 

@@ -34,6 +34,8 @@ const DEFAULT_SGLANG_BASE_URL: &str = "http://localhost:30000/v1";
 const DEFAULT_VLLM_MODEL: &str = "deepseek-ai/DeepSeek-V4-Pro";
 const DEFAULT_VLLM_FLASH_MODEL: &str = "deepseek-ai/DeepSeek-V4-Flash";
 const DEFAULT_VLLM_BASE_URL: &str = "http://localhost:8000/v1";
+const DEFAULT_OPENCODE_GO_MODEL: &str = "deepseek-v4-pro";
+const DEFAULT_OPENCODE_GO_BASE_URL: &str = "https://opencode.ai/zen/go/v1";
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "kebab-case")]
@@ -47,6 +49,7 @@ pub enum ProviderKind {
     Fireworks,
     Sglang,
     Vllm,
+    OpencodeGo,
 }
 
 impl ProviderKind {
@@ -61,6 +64,7 @@ impl ProviderKind {
             Self::Fireworks => "fireworks",
             Self::Sglang => "sglang",
             Self::Vllm => "vllm",
+            Self::OpencodeGo => "opencode-go",
         }
     }
 
@@ -75,6 +79,7 @@ impl ProviderKind {
             "fireworks" | "fireworks-ai" => Some(Self::Fireworks),
             "sglang" | "sg-lang" => Some(Self::Sglang),
             "vllm" | "v-llm" => Some(Self::Vllm),
+            "opencode-go" | "opencode_go" => Some(Self::OpencodeGo),
             _ => None,
         }
     }
@@ -105,6 +110,8 @@ pub struct ProvidersToml {
     pub sglang: ProviderConfigToml,
     #[serde(default)]
     pub vllm: ProviderConfigToml,
+    #[serde(default)]
+    pub opencode_go: ProviderConfigToml,
 }
 
 impl ProvidersToml {
@@ -119,6 +126,7 @@ impl ProvidersToml {
             ProviderKind::Fireworks => &self.fireworks,
             ProviderKind::Sglang => &self.sglang,
             ProviderKind::Vllm => &self.vllm,
+            ProviderKind::OpencodeGo => &self.opencode_go,
         }
     }
 
@@ -132,6 +140,7 @@ impl ProvidersToml {
             ProviderKind::Fireworks => &mut self.fireworks,
             ProviderKind::Sglang => &mut self.sglang,
             ProviderKind::Vllm => &mut self.vllm,
+            ProviderKind::OpencodeGo => &mut self.opencode_go,
         }
     }
 }
@@ -736,6 +745,7 @@ impl ConfigToml {
                 ProviderKind::Fireworks => DEFAULT_FIREWORKS_BASE_URL.to_string(),
                 ProviderKind::Sglang => DEFAULT_SGLANG_BASE_URL.to_string(),
                 ProviderKind::Vllm => DEFAULT_VLLM_BASE_URL.to_string(),
+                ProviderKind::OpencodeGo => DEFAULT_OPENCODE_GO_BASE_URL.to_string(),
             });
 
         let model = cli
@@ -754,6 +764,7 @@ impl ConfigToml {
                 ProviderKind::Fireworks => DEFAULT_FIREWORKS_MODEL.to_string(),
                 ProviderKind::Sglang => DEFAULT_SGLANG_MODEL.to_string(),
                 ProviderKind::Vllm => DEFAULT_VLLM_MODEL.to_string(),
+                ProviderKind::OpencodeGo => DEFAULT_OPENCODE_GO_MODEL.to_string(),
             });
         let model = normalize_model_for_provider(provider, &model);
 
@@ -1104,6 +1115,7 @@ impl EnvRuntimeOverrides {
             ProviderKind::Fireworks => self.fireworks_base_url.clone(),
             ProviderKind::Sglang => self.sglang_base_url.clone(),
             ProviderKind::Vllm => self.vllm_base_url.clone(),
+            ProviderKind::OpencodeGo => None,
         }
     }
 }
