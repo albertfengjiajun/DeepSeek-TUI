@@ -150,6 +150,8 @@ enum Commands {
     Config(ConfigArgs),
     /// Resolve or list available models across providers.
     Model(ModelArgs),
+    /// Manage model providers (list, add, remove, set-capability).
+    Provider(TuiPassthroughArgs),
     /// Manage thread/session metadata and resume/fork flows.
     Thread(ThreadArgs),
     /// Evaluate sandbox/approval policy decisions.
@@ -499,6 +501,10 @@ fn run() -> Result<()> {
         Some(Commands::McpServer) => run_mcp_server_command(&mut store),
         Some(Commands::Config(args)) => run_config_command(&mut store, args.command),
         Some(Commands::Model(args)) => run_model_command(args.command),
+        Some(Commands::Provider(args)) => {
+            let resolved_runtime = resolve_runtime_for_dispatch(&mut store, &runtime_overrides);
+            delegate_to_tui(&cli, &resolved_runtime, tui_args("provider", args))
+        }
         Some(Commands::Thread(args)) => run_thread_command(args.command),
         Some(Commands::Sandbox(args)) => run_sandbox_command(args.command),
         Some(Commands::AppServer(args)) => run_app_server_command(args),

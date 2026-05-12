@@ -130,6 +130,9 @@ pub struct DeepSeekClient {
     default_model: String,
     connection_health: Arc<AsyncMutex<ConnectionHealth>>,
     rate_limiter: Arc<AsyncMutex<TokenBucket>>,
+    protocol_adapter: Option<Arc<dyn crate::protocol_adapter::ProtocolAdapter>>,
+    capabilities: crate::models::ModelCapabilities,
+    custom_http_headers: HashMap<String, String>,
 }
 
 const CONNECTION_FAILURE_THRESHOLD: u32 = 2;
@@ -297,6 +300,9 @@ impl Clone for DeepSeekClient {
             default_model: self.default_model.clone(),
             connection_health: self.connection_health.clone(),
             rate_limiter: self.rate_limiter.clone(),
+            protocol_adapter: self.protocol_adapter.clone(),
+            capabilities: self.capabilities.clone(),
+            custom_http_headers: self.custom_http_headers.clone(),
         }
     }
 }
@@ -466,6 +472,13 @@ fn add_extra_root_certs(
 impl DeepSeekClient {
     /// Create a DeepSeek client from CLI configuration.
     pub fn new(config: &Config) -> Result<Self> {
+        Self::new_with_protocol(config, None)
+    }
+
+    pub fn new_with_protocol(
+        config: &Config,
+        protocol: Option<crate::config::ProtocolType>,
+    ) -> Result<Self> {
         let api_key = config.deepseek_api_key()?;
         let base_url = config.deepseek_base_url();
         let api_provider = config.api_provider();
@@ -489,6 +502,13 @@ impl DeepSeekClient {
 
         let http_client = Self::build_http_client(&api_key, &http_headers)?;
 
+        let protocol_adapter = match protocol {
+            Some(pt) if pt != crate::config::ProtocolType::OpenaiCompatible => Some(Arc::from(
+                crate::protocol_adapter::ProtocolAdapterFactory::create(pt),
+            )),
+            _ => None,
+        };
+
         Ok(Self {
             http_client,
             api_key,
@@ -498,6 +518,9 @@ impl DeepSeekClient {
             default_model,
             connection_health: Arc::new(AsyncMutex::new(ConnectionHealth::default())),
             rate_limiter: Arc::new(AsyncMutex::new(TokenBucket::from_env())),
+            protocol_adapter,
+            capabilities: crate::models::ModelCapabilities::default(),
+            custom_http_headers: http_headers,
         })
     }
 
@@ -748,14 +771,44 @@ impl LlmClient for DeepSeekClient {
     }
 
     async fn create_message(&self, request: MessageRequest) -> Result<MessageResponse> {
-        self.create_message_chat(&request).await
+        let request =
+            crate::capability_filter::CapabilityFilter::filter_request(request, &self.capabilities);
+        if let Some(ref adapter) = self.protocol_adapter {
+            adapter
+                .send_request(
+                    &self.http_client,
+                    &self.base_url,
+                    Some(&self.api_key),
+                    &self.custom_http_headers,
+                    request,
+                    &self.capabilities,
+                )
+                .await
+        } else {
+            self.create_message_chat(&request).await
+        }
     }
 
     async fn create_message_stream(
         &self,
         request: MessageRequest,
     ) -> Result<crate::llm_client::StreamEventBox> {
-        self.handle_chat_completion_stream(request).await
+        let request =
+            crate::capability_filter::CapabilityFilter::filter_request(request, &self.capabilities);
+        if let Some(ref adapter) = self.protocol_adapter {
+            adapter
+                .send_request_stream(
+                    &self.http_client,
+                    &self.base_url,
+                    Some(&self.api_key),
+                    &self.custom_http_headers,
+                    request,
+                    &self.capabilities,
+                )
+                .await
+        } else {
+            self.handle_chat_completion_stream(request).await
+        }
     }
 }
 
@@ -977,7 +1030,9 @@ impl DeepSeekClient {
     }
 }
 
-mod chat;
+pub(crate) mod anthropic;
+pub(crate) mod chat;
+pub(crate) mod gemini;
 
 #[cfg(test)]
 mod tests {

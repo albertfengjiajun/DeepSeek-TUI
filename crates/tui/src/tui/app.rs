@@ -694,6 +694,13 @@ pub struct App {
     /// Updated by `/provider` switches so the UI/commands can read the
     /// active backend without re-deriving it from the live config.
     pub api_provider: ApiProvider,
+    /// Actual provider name including custom providers.
+    /// For builtin providers this equals `api_provider.as_str()`;
+    /// for custom providers this holds the registry name.
+    pub active_provider_name: String,
+    /// Unified provider registry supporting both builtin and user-defined providers.
+    /// Lazily initialized; None until the first provider operation requires it.
+    pub provider_registry: Option<crate::provider_registry::ProviderRegistry>,
     /// Current reasoning-effort tier for DeepSeek thinking mode.
     /// Cycled via Shift+Tab; initialized from config at startup.
     pub reasoning_effort: ReasoningEffort,
@@ -1071,9 +1078,18 @@ impl std::ops::DerefMut for App {
 // === App State ===
 
 impl App {
-    /// Cap on the session turn-cache history. Holds enough turns to debug a long
-    /// session without being so large the on-screen `/cache` table wraps.
     pub const TURN_CACHE_HISTORY_CAP: usize = 50;
+
+    pub fn provider_registry(&mut self) -> &mut crate::provider_registry::ProviderRegistry {
+        if self.provider_registry.is_none() {
+            self.provider_registry = Some(crate::provider_registry::ProviderRegistry::new());
+        }
+        self.provider_registry.as_mut().unwrap()
+    }
+
+    pub fn provider_registry_ref(&self) -> Option<&crate::provider_registry::ProviderRegistry> {
+        self.provider_registry.as_ref()
+    }
 
     /// Append a per-turn cache-telemetry record, trimming the oldest entry once
     /// the ring exceeds [`Self::TURN_CACHE_HISTORY_CAP`].
@@ -1291,6 +1307,20 @@ impl App {
             auto_model,
             last_effective_model: None,
             api_provider: provider,
+            active_provider_name: provider.as_str().to_string(),
+            provider_registry: {
+                let mut registry = crate::provider_registry::ProviderRegistry::new();
+                if let Some(providers) = &config.providers {
+                    let _ = registry.load_from_providers_config(providers);
+                    if !providers.custom.is_empty() {
+                        let custom_toml = crate::provider_registry::ProvidersToml {
+                            entries: providers.custom.clone(),
+                        };
+                        let _ = registry.load_from_custom_providers(&custom_toml);
+                    }
+                }
+                Some(registry)
+            },
             reasoning_effort,
             last_effective_reasoning_effort: None,
             workspace,

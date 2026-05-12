@@ -4171,6 +4171,7 @@ async fn switch_provider(
     let new_model = config.default_model();
     let cache_scope_changed = previous_provider != target || previous_model != new_model;
     app.api_provider = target;
+    app.active_provider_name = target.as_str().to_string();
     app.model = new_model.clone();
     app.update_model_compaction_budget();
     if cache_scope_changed {
@@ -4210,6 +4211,145 @@ async fn switch_provider(
         ),
     });
     app.status_message = Some(format!("Provider: {}", target.as_str()));
+}
+
+async fn switch_to_custom_provider(
+    app: &mut App,
+    engine_handle: &mut EngineHandle,
+    config: &mut Config,
+    provider_name: &str,
+    api_key_override: Option<String>,
+) {
+    let registry = match app.provider_registry_ref() {
+        Some(r) => r,
+        None => {
+            app.status_message = Some("Provider registry not available".to_string());
+            return;
+        }
+    };
+
+    let resolved = match registry.get(provider_name) {
+        Some(r) => r.clone(),
+        None => {
+            app.status_message = Some(format!(
+                "Provider '{}' not found in registry",
+                provider_name
+            ));
+            return;
+        }
+    };
+
+    let _previous_provider = app.api_provider;
+    let previous_provider_name = app.active_provider_name.clone();
+    let previous_model = app.model.clone();
+    let previous_provider_str = config.provider.clone();
+    let previous_base_url = config.base_url.clone();
+    let previous_api_key = config.api_key.clone();
+    let previous_default_text_model = config.default_text_model.clone();
+
+    config.provider = Some(resolved.name.clone());
+    config.base_url = Some(resolved.base_url.clone());
+    config.active_protocol = Some(resolved.protocol);
+
+    if let Some(ref key) = api_key_override {
+        match crate::config::save_api_key_for_custom_provider(provider_name, key) {
+            Ok(path) => {
+                app.status_message = Some(format!(
+                    "Saved {} API key to {}",
+                    provider_name,
+                    path.display()
+                ));
+            }
+            Err(err) => {
+                app.add_message(HistoryCell::System {
+                    content: format!("Failed to persist {} API key: {err}", provider_name),
+                });
+            }
+        }
+
+        let providers = config.providers.get_or_insert_with(Default::default);
+        use crate::provider_registry::ProviderTomlConfig;
+        let entry = providers
+            .custom
+            .entry(provider_name.to_string())
+            .or_insert_with(ProviderTomlConfig::default);
+        entry.api_key = Some(key.clone());
+    }
+
+    let effective_api_key = api_key_override.or(resolved.api_key.clone());
+
+    if resolved.protocol == crate::config::ProtocolType::OpenaiCompatible {
+        config.api_key = effective_api_key.clone();
+    }
+
+    if let Some(ref model) = resolved.default_model {
+        config.default_text_model = Some(model.clone());
+    }
+
+    if let Err(err) = DeepSeekClient::new_with_protocol(config, Some(resolved.protocol)) {
+        config.provider = previous_provider_str;
+        config.base_url = previous_base_url;
+        config.api_key = previous_api_key;
+        config.default_text_model = previous_default_text_model;
+        app.add_message(HistoryCell::System {
+            content: format!(
+                "Failed to switch to custom provider '{}': {err}\nProvider unchanged ({}).",
+                provider_name, previous_provider_name
+            ),
+        });
+        return;
+    }
+
+    let new_model = config.default_model();
+    let closest_builtin = ApiProvider::parse(provider_name).unwrap_or(ApiProvider::Deepseek);
+    let cache_scope_changed =
+        previous_provider_name != provider_name || previous_model != new_model;
+
+    app.api_provider = closest_builtin;
+    app.active_provider_name = provider_name.to_string();
+    app.model = new_model.clone();
+    app.update_model_compaction_budget();
+    if cache_scope_changed {
+        app.clear_model_scoped_telemetry();
+    } else {
+        app.session.last_prompt_tokens = None;
+        app.session.last_completion_tokens = None;
+    }
+
+    if let Some(key) = effective_api_key
+        && let Some(registry) = app.provider_registry.as_mut()
+        && let Some(entry) = registry.get_mut(provider_name)
+    {
+        entry.api_key = Some(key);
+    }
+
+    let _ = engine_handle.send(Op::Shutdown).await;
+    let engine_config = build_engine_config(app, config);
+    *engine_handle = spawn_engine(engine_config, config);
+
+    if !app.api_messages.is_empty() {
+        let _ = engine_handle
+            .send(Op::SyncSession {
+                messages: app.api_messages.clone(),
+                system_prompt: app.system_prompt.clone(),
+                model: app.model.clone(),
+                workspace: app.workspace.clone(),
+            })
+            .await;
+    }
+    let _ = engine_handle
+        .send(Op::SetCompaction {
+            config: app.compaction_config(),
+        })
+        .await;
+
+    app.add_message(HistoryCell::System {
+        content: format!(
+            "Provider switched: {} → {}\nModel: {} → {}",
+            previous_provider_name, provider_name, previous_model, new_model
+        ),
+    });
+    app.status_message = Some(format!("Provider: {}", provider_name));
 }
 
 fn open_text_pager(app: &mut App, title: String, content: String) {
@@ -4636,11 +4776,12 @@ async fn apply_command_result(
             }
             AppAction::OpenProviderPicker => {
                 if app.view_stack.top_kind() != Some(ModalKind::ProviderPicker) {
-                    app.view_stack
-                        .push(crate::tui::provider_picker::ProviderPickerView::new(
-                            app.api_provider,
-                            config,
-                        ));
+                    let active = app.api_provider.as_str().to_string();
+                    let registry = app.provider_registry();
+                    let picker = crate::tui::provider_picker::ProviderPickerView::new(
+                        &active, registry, config,
+                    );
+                    app.view_stack.push(picker);
                 }
             }
             AppAction::OpenStatusPicker => {
@@ -5797,11 +5938,82 @@ async fn handle_view_events(
                 )
                 .await;
             }
-            ViewEvent::ProviderPickerApplied { provider } => {
-                switch_provider(app, engine_handle, config, provider, None).await;
+            ViewEvent::ProviderPickerApplied { provider_name } => {
+                if let Some(provider) = ApiProvider::parse(&provider_name) {
+                    switch_provider(app, engine_handle, config, provider, None).await;
+                } else {
+                    switch_to_custom_provider(app, engine_handle, config, &provider_name, None)
+                        .await;
+                }
             }
-            ViewEvent::ProviderPickerApiKeySubmitted { provider, api_key } => {
-                apply_provider_picker_api_key(app, engine_handle, config, provider, api_key).await;
+            ViewEvent::ProviderPickerApiKeySubmitted {
+                provider_name,
+                api_key,
+            } => {
+                if let Some(provider) = ApiProvider::parse(&provider_name) {
+                    apply_provider_picker_api_key(app, engine_handle, config, provider, api_key)
+                        .await;
+                } else {
+                    switch_to_custom_provider(
+                        app,
+                        engine_handle,
+                        config,
+                        &provider_name,
+                        Some(api_key),
+                    )
+                    .await;
+                }
+            }
+            ViewEvent::ProviderPickerDeleteRequested { provider_name } => {
+                if let Some(ref mut providers) = config.providers {
+                    providers.custom.remove(&provider_name);
+                }
+                if config.provider.as_deref() == Some(provider_name.as_str()) {
+                    config.provider = None;
+                    config.base_url = None;
+                    config.active_protocol = None;
+                }
+                let mut registry = crate::provider_registry::ProviderRegistry::new();
+                if let Some(ref providers) = config.providers {
+                    let custom_toml = crate::provider_registry::ProvidersToml {
+                        entries: providers.custom.clone(),
+                    };
+                    let _ = registry.load_from_custom_providers(&custom_toml);
+                }
+                app.provider_registry = Some(registry);
+                app.active_provider_name = "deepseek".to_string();
+                app.status_message = Some(format!("Deleted custom provider '{}'.", provider_name));
+            }
+            ViewEvent::ProviderPickerAddRequested {
+                name,
+                base_url,
+                protocol,
+                api_key,
+            } => {
+                let _ = crate::provider_registry::save_custom_provider_to_config(
+                    &name,
+                    &base_url,
+                    &protocol,
+                    api_key.as_deref(),
+                );
+                if let Some(ref mut providers) = config.providers {
+                    let entry = crate::provider_registry::ProviderTomlConfig {
+                        protocol: Some(protocol),
+                        base_url: Some(base_url),
+                        api_key: api_key.clone(),
+                        ..crate::provider_registry::ProviderTomlConfig::default()
+                    };
+                    providers.custom.insert(name.clone(), entry);
+                }
+                let mut registry = crate::provider_registry::ProviderRegistry::new();
+                if let Some(ref providers) = config.providers {
+                    let custom_toml = crate::provider_registry::ProvidersToml {
+                        entries: providers.custom.clone(),
+                    };
+                    let _ = registry.load_from_custom_providers(&custom_toml);
+                }
+                app.provider_registry = Some(registry);
+                switch_to_custom_provider(app, engine_handle, config, &name, api_key).await;
             }
             ViewEvent::BacktrackStep { direction } => {
                 app.backtrack.step(direction);

@@ -394,6 +394,150 @@ impl DeepSeekClient {
     }
 }
 
+pub(crate) fn openai_sse_stream_from_response(
+    response: reqwest::Response,
+    model: String,
+    replay_input_tokens: u32,
+) -> crate::llm_client::StreamEventBox {
+    use crate::models::{MessageResponse, StreamEvent, Usage};
+
+    let byte_stream = response.bytes_stream();
+    let stream = async_stream::stream! {
+        use futures_util::StreamExt;
+
+        yield Ok(StreamEvent::MessageStart {
+            message: MessageResponse {
+                id: String::new(),
+                r#type: "message".to_string(),
+                role: "assistant".to_string(),
+                content: Vec::new(),
+                model: model.clone(),
+                stop_reason: None,
+                stop_sequence: None,
+                container: None,
+                usage: Usage {
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    ..Usage::default()
+                },
+            },
+        });
+
+        let mut line_buf = String::new();
+        let mut byte_buf = acquire_stream_buffer();
+        let mut content_index: u32 = 0;
+        let mut text_started = false;
+        let mut thinking_started = false;
+        let mut tool_indices: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
+        let is_reasoning_model = requires_reasoning_content(&model);
+
+        let mut byte_stream = std::pin::pin!(byte_stream);
+        let idle = stream_idle_timeout();
+
+        let stream_start = std::time::Instant::now();
+        let mut last_event_at = std::time::Instant::now();
+        let mut bytes_received: usize = 0;
+
+        loop {
+            let chunk_result = match tokio_timeout(idle, byte_stream.next()).await {
+                Ok(Some(result)) => result,
+                Ok(None) => break,
+                Err(_elapsed) => {
+                    yield Err(anyhow::anyhow!(
+                        "SSE stream idle timeout after {}s — no data received",
+                        idle.as_secs(),
+                    ));
+                    break;
+                }
+            };
+            let chunk = match chunk_result {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    yield Err(anyhow::anyhow!("Stream read error: {e}"));
+                    break;
+                }
+            };
+
+            bytes_received = bytes_received.saturating_add(chunk.len());
+            last_event_at = std::time::Instant::now();
+            byte_buf.extend_from_slice(&chunk);
+
+            const MAX_SSE_BUF: usize = 10 * 1024 * 1024;
+            if byte_buf.len() > MAX_SSE_BUF {
+                yield Err(anyhow::anyhow!("SSE buffer exceeded {MAX_SSE_BUF} bytes — aborting stream"));
+                break;
+            }
+
+            if byte_buf.len() > SSE_BACKPRESSURE_HIGH_WATERMARK {
+                tokio::time::sleep(Duration::from_millis(SSE_BACKPRESSURE_SLEEP_MS)).await;
+            }
+
+            let mut lines_processed = 0usize;
+            while let Some(newline_pos) = byte_buf.iter().position(|&b| b == b'\n') {
+                let mut end = newline_pos;
+                if end > 0 && byte_buf[end - 1] == b'\r' {
+                    end -= 1;
+                }
+                let line = String::from_utf8_lossy(&byte_buf[..end]).into_owned();
+                byte_buf.drain(..newline_pos + 1);
+
+                if line.is_empty() {
+                    if !line_buf.is_empty() {
+                        let data = std::mem::take(&mut line_buf);
+                        if data.trim() == "[DONE]" {
+                            // Stream complete
+                        } else if let Ok(chunk_json) = serde_json::from_str::<Value>(&data) {
+                            for mut event in parse_sse_chunk(
+                                &chunk_json,
+                                &mut content_index,
+                                &mut text_started,
+                                &mut thinking_started,
+                                &mut tool_indices,
+                                is_reasoning_model,
+                            ) {
+                                if replay_input_tokens > 0
+                                    && let StreamEvent::MessageDelta {
+                                        usage: Some(usage),
+                                        ..
+                                    } = &mut event
+                                {
+                                    usage.reasoning_replay_tokens = Some(replay_input_tokens);
+                                }
+                                yield Ok(event);
+                            }
+                        }
+                    }
+                    continue;
+                }
+
+                if let Some(data) = line.strip_prefix("data: ") {
+                    line_buf.push_str(data);
+                }
+
+                lines_processed = lines_processed.saturating_add(1);
+                if lines_processed >= SSE_MAX_LINES_PER_CHUNK {
+                    break;
+                }
+            }
+        }
+
+        if thinking_started {
+            yield Ok(StreamEvent::ContentBlockStop { index: content_index.saturating_sub(1) });
+        }
+        if text_started {
+            yield Ok(StreamEvent::ContentBlockStop { index: content_index.saturating_sub(1) });
+        }
+
+        release_stream_buffer(byte_buf);
+        yield Ok(StreamEvent::MessageStop);
+    };
+
+    Pin::from(Box::new(stream)
+        as Box<
+            dyn futures_util::Stream<Item = Result<StreamEvent>> + Send,
+        >)
+}
+
 // === Chat Completions Helpers ===
 
 #[cfg(test)]
@@ -410,7 +554,7 @@ pub(super) fn build_chat_messages(
     )
 }
 
-pub(super) fn build_chat_messages_for_request(request: &MessageRequest) -> Vec<Value> {
+pub(crate) fn build_chat_messages_for_request(request: &MessageRequest) -> Vec<Value> {
     build_chat_messages_with_reasoning(
         request.system.as_ref(),
         &request.messages,
@@ -728,7 +872,7 @@ pub(super) fn tool_to_chat(tool: &Tool) -> Value {
     value
 }
 
-pub(super) fn tool_to_chat_for_base_url(tool: &Tool, base_url: &str) -> Value {
+pub(crate) fn tool_to_chat_for_base_url(tool: &Tool, base_url: &str) -> Value {
     let mut value = tool_to_chat(tool);
     if !deepseek_base_url_supports_strict_tools(base_url)
         && let Some(function) = value.get_mut("function")
@@ -952,7 +1096,7 @@ fn reasoning_field(value: &Value) -> Option<&str> {
         .and_then(Value::as_str)
 }
 
-pub(super) fn parse_chat_message(payload: &Value) -> Result<MessageResponse> {
+pub(crate) fn parse_chat_message(payload: &Value) -> Result<MessageResponse> {
     let id = payload
         .get("id")
         .and_then(Value::as_str)

@@ -2,6 +2,57 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Model capability declaration with all fields as `Option<T>` to support
+/// "unconfigured → use default" semantics.  User-explicit declarations
+/// (Some) take priority over defaults; None means "inherit from default".
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct ModelCapabilities {
+    pub thinking_supported: Option<bool>,
+    pub supports_tools: Option<bool>,
+    pub supports_reasoning: Option<bool>,
+    pub supports_vision: Option<bool>,
+    pub supports_streaming: Option<bool>,
+    pub supports_embedding: Option<bool>,
+    pub context_window: Option<u32>,
+    pub max_output: Option<u32>,
+    pub cache_telemetry_supported: Option<bool>,
+}
+
+impl ModelCapabilities {
+    /// Merge user-explicit declarations with defaults: `Some` from self wins,
+    /// otherwise falls through to `defaults`.
+    #[must_use]
+    pub fn merge_with_defaults(&self, defaults: &ModelCapabilities) -> ModelCapabilities {
+        ModelCapabilities {
+            thinking_supported: self.thinking_supported.or(defaults.thinking_supported),
+            supports_tools: self.supports_tools.or(defaults.supports_tools),
+            supports_reasoning: self.supports_reasoning.or(defaults.supports_reasoning),
+            supports_vision: self.supports_vision.or(defaults.supports_vision),
+            supports_streaming: self.supports_streaming.or(defaults.supports_streaming),
+            supports_embedding: self.supports_embedding.or(defaults.supports_embedding),
+            context_window: self.context_window.or(defaults.context_window),
+            max_output: self.max_output.or(defaults.max_output),
+            cache_telemetry_supported: self
+                .cache_telemetry_supported
+                .or(defaults.cache_telemetry_supported),
+        }
+    }
+
+    /// Returns true when all fields are None (no user declarations).
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.thinking_supported.is_none()
+            && self.supports_tools.is_none()
+            && self.supports_reasoning.is_none()
+            && self.supports_vision.is_none()
+            && self.supports_streaming.is_none()
+            && self.supports_embedding.is_none()
+            && self.context_window.is_none()
+            && self.max_output.is_none()
+            && self.cache_telemetry_supported.is_none()
+    }
+}
+
 /// Context window used only for legacy DeepSeek model IDs that do not name a
 /// newer V4 alias and do not carry an explicit `*k` suffix.
 pub const LEGACY_DEEPSEEK_CONTEXT_WINDOW_TOKENS: u32 = 128_000;

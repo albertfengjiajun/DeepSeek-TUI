@@ -141,14 +141,27 @@ pub enum ViewEvent {
     /// that already has credentials — the handler should perform the same
     /// switch as `AppAction::SwitchProvider`.
     ProviderPickerApplied {
-        provider: crate::config::ApiProvider,
+        provider_name: String,
     },
     /// Emitted by the `/provider` picker after the user types an API key
     /// inline for a provider that lacked one. The handler should persist
     /// the key via `save_api_key_for` and then perform the provider switch.
     ProviderPickerApiKeySubmitted {
-        provider: crate::config::ApiProvider,
+        provider_name: String,
         api_key: String,
+    },
+    /// Emitted by the `/provider` picker when the user confirms deletion
+    /// of a user-defined provider. The handler should unregister the provider.
+    ProviderPickerDeleteRequested {
+        provider_name: String,
+    },
+    /// Emitted by the `/provider` picker when the user fills in the add-provider
+    /// form and presses Enter. The handler should register the provider.
+    ProviderPickerAddRequested {
+        name: String,
+        base_url: String,
+        protocol: String,
+        api_key: Option<String>,
     },
     /// Emitted by the `/statusline` picker every time the user toggles an
     /// item (live preview) and once more on Enter (final). The handler

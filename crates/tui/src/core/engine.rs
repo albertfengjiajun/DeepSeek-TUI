@@ -413,10 +413,12 @@ impl Engine {
         let tool_exec_lock = Arc::new(RwLock::new(()));
 
         // Create clients for both providers
-        let (deepseek_client, deepseek_client_error) = match DeepSeekClient::new(api_config) {
-            Ok(client) => (Some(client), None),
-            Err(err) => (None, Some(err.to_string())),
-        };
+        let active_protocol = api_config.active_protocol;
+        let (deepseek_client, deepseek_client_error) =
+            match DeepSeekClient::new_with_protocol(api_config, active_protocol) {
+                Ok(client) => (Some(client), None),
+                Err(err) => (None, Some(err.to_string())),
+            };
         let api_key_env_only_recovery = Self::env_only_api_key_recovery_hint(api_config);
 
         let mut session = Session::new(

@@ -191,11 +191,37 @@ pub struct ModelAliasDeprecation {
     pub notice: String,
 }
 
+/// Supported API protocol types for provider communication.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProtocolType {
+    /// OpenAI Chat Completions compatible protocol (reuses existing DeepSeekClient).
+    OpenaiCompatible,
+    /// Anthropic Messages API protocol.
+    AnthropicMessages,
+    /// Google Gemini generateContent API protocol.
+    GoogleGemini,
+}
+
+impl std::fmt::Display for ProtocolType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::OpenaiCompatible => write!(f, "openai_compatible"),
+            Self::AnthropicMessages => write!(f, "anthropic_messages"),
+            Self::GoogleGemini => write!(f, "google_gemini"),
+        }
+    }
+}
+
 /// Which request-payload dialect the provider speaks.
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub enum RequestPayloadMode {
     /// Standard OpenAI-compatible `/v1/chat/completions` payload.
     ChatCompletions,
+    /// Anthropic `/v1/messages` payload.
+    AnthropicMessages,
+    /// Google Gemini `generateContent` payload.
+    GoogleGemini,
 }
 
 /// Resolve the provider capability for a given [`ApiProvider`] and resolved
@@ -205,87 +231,33 @@ pub enum RequestPayloadMode {
 /// in the API payload (after normalization / provider-specific mapping).
 #[must_use]
 pub fn provider_capability(provider: ApiProvider, resolved_model: &str) -> ProviderCapability {
-    if matches!(provider, ApiProvider::Openai) {
-        return ProviderCapability {
-            provider,
-            resolved_model: resolved_model.to_string(),
-            context_window: crate::models::LEGACY_DEEPSEEK_CONTEXT_WINDOW_TOKENS,
-            max_output: 4096,
-            thinking_supported: false,
-            cache_telemetry_supported: false,
-            request_payload_mode: RequestPayloadMode::ChatCompletions,
-            alias_deprecation: None,
-        };
-    }
+    let protocol = crate::capability_bridge::CapabilityBridge::provider_to_protocol(provider);
+    let builtin_caps = crate::capability_bridge::CapabilityBridge::builtin_model_capabilities(
+        provider,
+        resolved_model,
+    );
+    let caps = crate::capability_bridge::CapabilityBridge::resolve_capabilities(
+        None,
+        Some(&builtin_caps),
+        protocol,
+    );
 
-    if matches!(provider, ApiProvider::Ollama) {
-        return ProviderCapability {
-            provider,
-            resolved_model: resolved_model.to_string(),
-            context_window: 8192,
-            max_output: 4096,
-            thinking_supported: false,
-            cache_telemetry_supported: false,
-            request_payload_mode: RequestPayloadMode::ChatCompletions,
-            alias_deprecation: None,
-        };
-    }
-
-    let model_lower = resolved_model.to_ascii_lowercase();
     let alias_deprecation = if matches!(provider, ApiProvider::Deepseek | ApiProvider::DeepseekCN) {
-        deepseek_alias_deprecation(&model_lower)
+        deepseek_alias_deprecation(&resolved_model.to_ascii_lowercase())
     } else {
         None
     };
-    let is_v4_pro = model_lower.contains("v4-pro") || model_lower == "deepseek-v4pro";
-    let is_v4_flash = model_lower.contains("v4-flash")
-        || model_lower == "deepseek-v4flash"
-        || model_lower == "deepseek-v4"
-        || alias_deprecation.is_some();
 
-    // Context window: V4-class models get 1M, everything else falls through
-    // to the model's own lookup or a default.
-    let context_window = if is_v4_pro || is_v4_flash {
-        crate::models::DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS
-    } else {
-        crate::models::context_window_for_model(resolved_model)
-            .unwrap_or(crate::models::LEGACY_DEEPSEEK_CONTEXT_WINDOW_TOKENS)
-    };
-
-    // Max output tokens: official DeepSeek V4 API metadata lists 384K;
-    // runtime request caps remain separate and more conservative.
-    let max_output = if is_v4_pro || is_v4_flash {
-        384_000
-    } else {
-        4096
-    };
-
-    // Thinking support: V4 models support thinking on all providers, but
-    // only when the model name matches the V4 family.
-    let thinking_supported = is_v4_pro || is_v4_flash;
-
-    // Cache telemetry: returned only by DeepSeek-native and NVIDIA NIM endpoints.
-    let cache_telemetry_supported = matches!(
+    crate::capability_bridge::CapabilityBridge::to_provider_capability(
         provider,
-        ApiProvider::Deepseek | ApiProvider::DeepseekCN | ApiProvider::NvidiaNim
-    );
-
-    // Request payload mode: all current providers use chat completions.
-    let request_payload_mode = RequestPayloadMode::ChatCompletions;
-
-    ProviderCapability {
-        provider,
-        resolved_model: resolved_model.to_string(),
-        context_window,
-        max_output,
-        thinking_supported,
-        cache_telemetry_supported,
-        request_payload_mode,
+        resolved_model,
+        &caps,
+        protocol,
         alias_deprecation,
-    }
+    )
 }
 
-fn deepseek_alias_deprecation(model_lower: &str) -> Option<ModelAliasDeprecation> {
+pub(crate) fn deepseek_alias_deprecation(model_lower: &str) -> Option<ModelAliasDeprecation> {
     match model_lower {
         "deepseek-chat" | "deepseek-reasoner" => Some(ModelAliasDeprecation {
             alias: model_lower.to_string(),
@@ -755,6 +727,8 @@ pub struct Config {
     pub provider: Option<String>,
     pub api_key: Option<String>,
     pub base_url: Option<String>,
+    #[serde(skip)]
+    pub active_protocol: Option<ProtocolType>,
     /// Optional extra HTTP headers sent to model API requests.
     pub http_headers: Option<HashMap<String, String>>,
     pub default_text_model: Option<String>,
@@ -805,6 +779,8 @@ pub struct Config {
     pub hooks: Option<HooksConfig>,
 
     /// Provider-specific credentials and defaults shared with the `deepseek` facade.
+    /// Supports both builtin providers (static fields) and user-defined providers
+    /// (dynamic HashMap via `#[serde(flatten)]`), all under `[providers.<name>]`.
     #[serde(default)]
     pub providers: Option<ProvidersConfig>,
 
@@ -1012,10 +988,13 @@ impl LspConfigToml {
 
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct ProviderConfig {
+    pub protocol: Option<String>,
+    pub display_name: Option<String>,
     pub api_key: Option<String>,
     pub base_url: Option<String>,
     pub model: Option<String>,
     pub http_headers: Option<HashMap<String, String>>,
+    pub capabilities: Option<crate::models::ModelCapabilities>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -1040,6 +1019,8 @@ pub struct ProvidersConfig {
     pub vllm: ProviderConfig,
     #[serde(default)]
     pub ollama: ProviderConfig,
+    #[serde(flatten)]
+    pub custom: HashMap<String, crate::provider_registry::ProviderTomlConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -1629,7 +1610,7 @@ impl Config {
 
 // === Defaults ===
 
-fn default_config_path() -> Option<PathBuf> {
+pub(crate) fn default_config_path() -> Option<PathBuf> {
     env_config_path().or_else(home_config_path)
 }
 
@@ -2209,6 +2190,27 @@ fn apply_env_overrides(config: &mut Config) {
     }) {
         config.capacity = None;
     }
+
+    // Custom provider environment variable overrides:
+    // DEEPSEEK_PROVIDER_<NAME>_API_KEY and DEEPSEEK_PROVIDER_<NAME>_BASE_URL
+    if let Some(providers) = config.providers.as_mut() {
+        for (name, entry) in providers.custom.iter_mut() {
+            let env_prefix = format!(
+                "DEEPSEEK_PROVIDER_{}",
+                name.to_uppercase().replace('-', "_")
+            );
+            if let Ok(value) = std::env::var(format!("{}_API_KEY", env_prefix))
+                && !value.trim().is_empty()
+            {
+                entry.api_key = Some(value);
+            }
+            if let Ok(value) = std::env::var(format!("{}_BASE_URL", env_prefix))
+                && !value.trim().is_empty()
+            {
+                entry.base_url = Some(value);
+            }
+        }
+    }
 }
 
 fn normalize_model_config(config: &mut Config) {
@@ -2407,6 +2409,7 @@ fn merge_config(base: Config, override_cfg: Config) -> Config {
         provider: override_cfg.provider.or(base.provider),
         api_key: override_cfg.api_key.or(base.api_key),
         base_url: override_cfg.base_url.or(base.base_url),
+        active_protocol: override_cfg.active_protocol.or(base.active_protocol),
         http_headers: override_cfg.http_headers.or(base.http_headers),
         default_text_model: override_cfg.default_text_model.or(base.default_text_model),
         reasoning_effort: override_cfg.reasoning_effort.or(base.reasoning_effort),
@@ -2476,10 +2479,13 @@ fn merge_config(base: Config, override_cfg: Config) -> Config {
 
 fn merge_provider_config(base: ProviderConfig, override_cfg: ProviderConfig) -> ProviderConfig {
     ProviderConfig {
+        protocol: override_cfg.protocol.or(base.protocol),
+        display_name: override_cfg.display_name.or(base.display_name),
         api_key: override_cfg.api_key.or(base.api_key),
         base_url: override_cfg.base_url.or(base.base_url),
         model: override_cfg.model.or(base.model),
         http_headers: override_cfg.http_headers.or(base.http_headers),
+        capabilities: override_cfg.capabilities.or(base.capabilities),
     }
 }
 
@@ -2502,8 +2508,52 @@ fn merge_providers(
             sglang: merge_provider_config(base.sglang, override_cfg.sglang),
             vllm: merge_provider_config(base.vllm, override_cfg.vllm),
             ollama: merge_provider_config(base.ollama, override_cfg.ollama),
+            custom: merge_custom_providers(base.custom, override_cfg.custom),
         }),
     }
+}
+
+fn merge_custom_providers(
+    base: HashMap<String, crate::provider_registry::ProviderTomlConfig>,
+    override_cfg: HashMap<String, crate::provider_registry::ProviderTomlConfig>,
+) -> HashMap<String, crate::provider_registry::ProviderTomlConfig> {
+    let mut result = base;
+    for (name, override_entry) in override_cfg {
+        result
+            .entry(name)
+            .and_modify(|base_entry| {
+                let merged = crate::provider_registry::ProviderTomlConfig {
+                    protocol: override_entry
+                        .protocol
+                        .clone()
+                        .or(base_entry.protocol.clone()),
+                    display_name: override_entry
+                        .display_name
+                        .clone()
+                        .or(base_entry.display_name.clone()),
+                    base_url: override_entry
+                        .base_url
+                        .clone()
+                        .or(base_entry.base_url.clone()),
+                    api_key: override_entry
+                        .api_key
+                        .clone()
+                        .or(base_entry.api_key.clone()),
+                    model: override_entry.model.clone().or(base_entry.model.clone()),
+                    http_headers: override_entry
+                        .http_headers
+                        .clone()
+                        .or(base_entry.http_headers.clone()),
+                    capabilities: override_entry
+                        .capabilities
+                        .clone()
+                        .or(base_entry.capabilities.clone()),
+                };
+                *base_entry = merged;
+            })
+            .or_insert(override_entry);
+    }
+    result
 }
 
 fn load_single_config_file(path: &Path) -> Result<Config> {
@@ -2639,7 +2689,7 @@ pub fn ensure_parent_dir(path: &Path) -> Result<()> {
 
 /// Write content to a config file with restrictive permissions (owner-only read/write).
 /// On Unix this sets mode 0o600 before writing.
-fn write_config_file_secure(path: &Path, content: &str) -> Result<()> {
+pub(crate) fn write_config_file_secure(path: &Path, content: &str) -> Result<()> {
     #[cfg(unix)]
     {
         let mut file = fs::OpenOptions::new()
@@ -3067,6 +3117,52 @@ pub fn save_api_key_for(provider: ApiProvider, api_key: &str) -> Result<PathBuf>
         json!({
             "backend": "config_file",
             "provider": provider.as_str(),
+            "config_path": config_path.display().to_string(),
+        }),
+    );
+
+    Ok(config_path)
+}
+
+pub fn save_api_key_for_custom_provider(provider_name: &str, api_key: &str) -> Result<PathBuf> {
+    let config_path = default_config_path()
+        .context("Failed to resolve config path: home directory not found.")?;
+    ensure_parent_dir(&config_path)?;
+
+    let mut doc: toml::Value = if config_path.exists() {
+        let raw = fs::read_to_string(&config_path)?;
+        toml::from_str(&raw)
+            .with_context(|| format!("Failed to parse config at {}", config_path.display()))?
+    } else {
+        toml::Value::Table(toml::value::Table::new())
+    };
+
+    let table = doc
+        .as_table_mut()
+        .context("Config root must be a TOML table.")?;
+    let providers = table
+        .entry("providers".to_string())
+        .or_insert_with(|| toml::Value::Table(toml::value::Table::new()))
+        .as_table_mut()
+        .context("`providers` must be a table.")?;
+    let entry = providers
+        .entry(provider_name.to_string())
+        .or_insert_with(|| toml::Value::Table(toml::value::Table::new()))
+        .as_table_mut()
+        .with_context(|| format!("`providers.{}` must be a table.", provider_name))?;
+    entry.insert(
+        "api_key".to_string(),
+        toml::Value::String(api_key.to_string()),
+    );
+
+    let serialized = toml::to_string_pretty(&doc).context("failed to serialize updated config")?;
+    write_config_file_secure(&config_path, &serialized)
+        .with_context(|| format!("Failed to write config to {}", config_path.display()))?;
+    log_sensitive_event(
+        "credential.save",
+        json!({
+            "backend": "config_file",
+            "provider": provider_name,
             "config_path": config_path.display().to_string(),
         }),
     );

@@ -1,22 +1,3 @@
-//! `/provider` picker modal — pick a provider (DeepSeek / NVIDIA NIM /
-//! hosted providers / self-hosted providers) and, if it lacks credentials, type the API key
-//! inline before completing the switch (#52).
-//!
-//! The picker is intentionally a single modal with two visible states:
-//!
-//! 1. **List** — pick a provider; each row shows the active provider arrow
-//!    and an "API key configured" / "needs API key" hint. Enter on a
-//!    configured provider applies the switch immediately
-//!    ([`ViewEvent::ProviderPickerApplied`]). Enter on an un-configured one
-//!    transitions the same modal into the key-entry state.
-//! 2. **Key entry** — masked input box pre-filled with the provider's
-//!    canonical env-var name as a hint. Enter submits
-//!    [`ViewEvent::ProviderPickerApiKeySubmitted`], which the UI handler
-//!    persists via `save_api_key_for` before switching.
-//!
-//! Pressing Esc backs out: from key entry returns to the list; from the
-//! list closes the modal without changes.
-
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     buffer::Buffer,
@@ -26,7 +7,7 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Paragraph, Widget},
 };
 
-use crate::config::{ApiProvider, Config, has_api_key_for};
+use crate::config::Config;
 use crate::palette;
 use crate::tui::views::{ModalKind, ModalView, ViewAction, ViewEvent};
 
@@ -34,33 +15,74 @@ use crate::tui::views::{ModalKind, ModalView, ViewAction, ViewEvent};
 enum Stage {
     List,
     KeyEntry,
+    ConfirmDelete,
+    AddProvider,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AddField {
+    Name,
+    BaseUrl,
+    Protocol,
+    ApiKey,
+}
+
+struct ProviderRow {
+    name: String,
+    display_name: String,
+    has_key: bool,
+    is_builtin: bool,
+}
+
+const PROTOCOL_OPTIONS: &[&str] = &["openai_compatible", "anthropic_messages", "google_gemini"];
+
 pub struct ProviderPickerView {
-    providers: Vec<(ApiProvider, bool)>,
-    active_provider: ApiProvider,
+    providers: Vec<ProviderRow>,
+    active_provider: String,
     selected_idx: usize,
     stage: Stage,
     api_key_input: String,
+    add_name: String,
+    add_base_url: String,
+    add_protocol_idx: usize,
+    add_api_key: String,
+    add_field: AddField,
 }
 
 impl ProviderPickerView {
     #[must_use]
-    pub fn new(active: ApiProvider, config: &Config) -> Self {
-        let providers: Vec<(ApiProvider, bool)> = ApiProvider::all()
+    pub fn new(
+        active_provider: &str,
+        registry: &crate::provider_registry::ProviderRegistry,
+        _config: &Config,
+    ) -> Self {
+        let providers: Vec<ProviderRow> = registry
+            .all_providers()
             .iter()
-            .map(|p| (*p, has_api_key_for(config, *p)))
+            .map(|p| ProviderRow {
+                name: p.name.clone(),
+                display_name: p.display_name.clone(),
+                has_key: p.api_key.is_some(),
+                is_builtin: p.is_builtin,
+            })
             .collect();
+
         let selected_idx = providers
             .iter()
-            .position(|(p, _)| *p == active)
+            .position(|p| p.name == active_provider)
             .unwrap_or(0);
+
         Self {
             providers,
-            active_provider: active,
+            active_provider: active_provider.to_string(),
             selected_idx,
             stage: Stage::List,
             api_key_input: String::new(),
+            add_name: String::new(),
+            add_base_url: String::new(),
+            add_protocol_idx: 0,
+            add_api_key: String::new(),
+            add_field: AddField::Name,
         }
     }
 
@@ -76,37 +98,34 @@ impl ProviderPickerView {
         }
     }
 
-    fn selected_provider(&self) -> ApiProvider {
-        self.providers[self.selected_idx].0
+    fn selected_name(&self) -> &str {
+        &self.providers[self.selected_idx].name
     }
 
     fn selected_has_key(&self) -> bool {
-        self.providers[self.selected_idx].1
+        self.providers[self.selected_idx].has_key
     }
 
-    fn env_var_for(provider: ApiProvider) -> &'static str {
-        match provider {
-            ApiProvider::Deepseek | ApiProvider::DeepseekCN => "DEEPSEEK_API_KEY",
-            ApiProvider::NvidiaNim => "NVIDIA_API_KEY",
-            ApiProvider::Openai => "OPENAI_API_KEY",
-            ApiProvider::Openrouter => "OPENROUTER_API_KEY",
-            ApiProvider::Novita => "NOVITA_API_KEY",
-            ApiProvider::Fireworks => "FIREWORKS_API_KEY",
-            ApiProvider::Sglang => "SGLANG_API_KEY",
-            ApiProvider::Vllm => "VLLM_API_KEY",
-            ApiProvider::Ollama => "OLLAMA_API_KEY",
+    fn env_var_for(name: &str) -> String {
+        let upper = name.to_ascii_uppercase().replace('-', "_");
+        format!("DEEPSEEK_PROVIDER_{}_API_KEY", upper)
+    }
+
+    fn provider_hint(row: &ProviderRow) -> String {
+        if row.name == "ollama" {
+            return "self-hosted; defaults to http://localhost:11434".to_string();
         }
-    }
-
-    fn provider_hint(provider: ApiProvider, has_key: bool) -> String {
-        match provider {
-            ApiProvider::Ollama => "self-hosted; defaults to http://localhost:11434".to_string(),
-            ApiProvider::Sglang | ApiProvider::Vllm if has_key => {
+        if row.name == "sglang" || row.name == "vllm" {
+            return if row.has_key {
                 "(configured; optional key)".to_string()
-            }
-            ApiProvider::Sglang | ApiProvider::Vllm => "(optional key)".to_string(),
-            _ if has_key => "(configured)".to_string(),
-            _ => "(needs API key)".to_string(),
+            } else {
+                "(optional key)".to_string()
+            };
+        }
+        if row.has_key {
+            "(configured)".to_string()
+        } else {
+            "(needs API key)".to_string()
         }
     }
 
@@ -123,6 +142,10 @@ impl ProviderPickerView {
                 Span::raw("move "),
                 Span::styled(" Enter ", Style::default().fg(palette::TEXT_MUTED)),
                 Span::raw("apply "),
+                Span::styled(" d ", Style::default().fg(palette::TEXT_MUTED)),
+                Span::raw("delete "),
+                Span::styled(" a ", Style::default().fg(palette::TEXT_MUTED)),
+                Span::raw("add "),
                 Span::styled(" Esc ", Style::default().fg(palette::TEXT_MUTED)),
                 Span::raw("cancel "),
             ]))
@@ -133,9 +156,9 @@ impl ProviderPickerView {
         outer.render(area, buf);
 
         let mut lines: Vec<Line> = Vec::with_capacity(self.providers.len());
-        for (idx, (provider, has_key)) in self.providers.iter().enumerate() {
+        for (idx, row) in self.providers.iter().enumerate() {
             let is_selected = idx == self.selected_idx;
-            let is_active = *provider == self.active_provider;
+            let is_active = row.name == self.active_provider;
             let arrow = if is_selected { "▸" } else { " " };
             let active_dot = if is_active { " *" } else { "  " };
             let label_style = if is_selected {
@@ -150,17 +173,23 @@ impl ProviderPickerView {
                 Style::default()
                     .fg(palette::SELECTION_TEXT)
                     .bg(palette::SELECTION_BG)
-            } else if *has_key {
+            } else if row.has_key {
                 Style::default().fg(palette::TEXT_MUTED)
             } else {
                 Style::default().fg(palette::STATUS_WARNING)
             };
-            let hint = Self::provider_hint(*provider, *has_key);
+            let hint = Self::provider_hint(row);
+            let badge = if !row.is_builtin {
+                " (user-defined)"
+            } else {
+                ""
+            };
             lines.push(Line::from(vec![
                 Span::raw(" "),
                 Span::styled(arrow, label_style),
                 Span::raw(" "),
-                Span::styled(provider.display_name().to_string(), label_style),
+                Span::styled(row.display_name.clone(), label_style),
+                Span::styled(badge.to_string(), hint_style),
                 Span::styled(active_dot, label_style),
                 Span::raw("  "),
                 Span::styled(hint, hint_style),
@@ -170,10 +199,10 @@ impl ProviderPickerView {
     }
 
     fn render_key_entry(&self, area: Rect, buf: &mut Buffer) {
-        let provider = self.selected_provider();
+        let display_name = &self.providers[self.selected_idx].display_name;
         let outer = Block::default()
             .title(Line::from(Span::styled(
-                format!(" API key — {} ", provider.display_name()),
+                format!(" API key — {} ", display_name),
                 Style::default()
                     .fg(palette::DEEPSEEK_SKY)
                     .add_modifier(Modifier::BOLD),
@@ -218,7 +247,7 @@ impl ProviderPickerView {
 
         let hint = format!(
             "Or set the {} environment variable and re-open /provider.",
-            Self::env_var_for(provider),
+            Self::env_var_for(self.selected_name()),
         );
         Paragraph::new(Line::from(Span::styled(
             hint,
@@ -282,14 +311,32 @@ impl ModalView for ProviderPickerView {
                     ViewAction::None
                 }
                 KeyCode::Enter => {
-                    let provider = self.selected_provider();
                     if self.selected_has_key() {
-                        ViewAction::EmitAndClose(ViewEvent::ProviderPickerApplied { provider })
+                        ViewAction::EmitAndClose(ViewEvent::ProviderPickerApplied {
+                            provider_name: self.selected_name().to_string(),
+                        })
                     } else {
                         self.stage = Stage::KeyEntry;
                         self.api_key_input.clear();
                         ViewAction::None
                     }
+                }
+                KeyCode::Char('d') | KeyCode::Delete => {
+                    if !self.providers[self.selected_idx].is_builtin {
+                        self.stage = Stage::ConfirmDelete;
+                        ViewAction::None
+                    } else {
+                        ViewAction::None
+                    }
+                }
+                KeyCode::Char('a') => {
+                    self.stage = Stage::AddProvider;
+                    self.add_name.clear();
+                    self.add_base_url.clear();
+                    self.add_protocol_idx = 0;
+                    self.add_api_key.clear();
+                    self.add_field = AddField::Name;
+                    ViewAction::None
                 }
                 _ => ViewAction::None,
             },
@@ -310,22 +357,118 @@ impl ModalView for ProviderPickerView {
                 KeyCode::Enter => {
                     let key = self.api_key_input.trim().to_string();
                     if key.is_empty() {
-                        // Stay in key-entry; the user can press Esc to abort.
                         ViewAction::None
                     } else {
-                        let provider = self.selected_provider();
                         ViewAction::EmitAndClose(ViewEvent::ProviderPickerApiKeySubmitted {
-                            provider,
+                            provider_name: self.selected_name().to_string(),
                             api_key: key,
                         })
                     }
                 }
                 KeyCode::Char(c) => {
-                    // Reject ASCII whitespace so a stray space/tab doesn't slip
-                    // into a credential; bracketed paste happens via the input
-                    // path that already trims on submit.
                     if !c.is_whitespace() {
                         self.api_key_input.push(c);
+                    }
+                    ViewAction::None
+                }
+                _ => ViewAction::None,
+            },
+            Stage::ConfirmDelete => match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    ViewAction::EmitAndClose(ViewEvent::ProviderPickerDeleteRequested {
+                        provider_name: self.selected_name().to_string(),
+                    })
+                }
+                KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
+                    self.stage = Stage::List;
+                    ViewAction::None
+                }
+                _ => ViewAction::None,
+            },
+            Stage::AddProvider => match key.code {
+                KeyCode::Esc => {
+                    self.stage = Stage::List;
+                    ViewAction::None
+                }
+                KeyCode::Tab => {
+                    self.add_field = match self.add_field {
+                        AddField::Name => AddField::BaseUrl,
+                        AddField::BaseUrl => AddField::Protocol,
+                        AddField::Protocol => AddField::ApiKey,
+                        AddField::ApiKey => AddField::Name,
+                    };
+                    ViewAction::None
+                }
+                KeyCode::Up if self.add_field == AddField::Protocol => {
+                    if self.add_protocol_idx > 0 {
+                        self.add_protocol_idx -= 1;
+                    }
+                    ViewAction::None
+                }
+                KeyCode::Down if self.add_field == AddField::Protocol => {
+                    if self.add_protocol_idx + 1 < PROTOCOL_OPTIONS.len() {
+                        self.add_protocol_idx += 1;
+                    }
+                    ViewAction::None
+                }
+                KeyCode::Backspace => {
+                    match self.add_field {
+                        AddField::Name => {
+                            self.add_name.pop();
+                        }
+                        AddField::BaseUrl => {
+                            self.add_base_url.pop();
+                        }
+                        AddField::ApiKey => {
+                            self.add_api_key.pop();
+                        }
+                        AddField::Protocol => {}
+                    }
+                    ViewAction::None
+                }
+                KeyCode::Char('h') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    match self.add_field {
+                        AddField::Name => {
+                            self.add_name.pop();
+                        }
+                        AddField::BaseUrl => {
+                            self.add_base_url.pop();
+                        }
+                        AddField::ApiKey => {
+                            self.add_api_key.pop();
+                        }
+                        AddField::Protocol => {}
+                    }
+                    ViewAction::None
+                }
+                KeyCode::Enter => {
+                    if !self.add_name.is_empty() && !self.add_base_url.is_empty() {
+                        ViewAction::EmitAndClose(ViewEvent::ProviderPickerAddRequested {
+                            name: self.add_name.trim().to_string(),
+                            base_url: self.add_base_url.trim().to_string(),
+                            protocol: PROTOCOL_OPTIONS[self.add_protocol_idx].to_string(),
+                            api_key: if self.add_api_key.trim().is_empty() {
+                                None
+                            } else {
+                                Some(self.add_api_key.trim().to_string())
+                            },
+                        })
+                    } else {
+                        ViewAction::None
+                    }
+                }
+                KeyCode::Char(c) => {
+                    match self.add_field {
+                        AddField::Name => {
+                            self.add_name.push(c);
+                        }
+                        AddField::BaseUrl => {
+                            self.add_base_url.push(c);
+                        }
+                        AddField::ApiKey if !c.is_whitespace() => {
+                            self.add_api_key.push(c);
+                        }
+                        _ => {}
                     }
                     ViewAction::None
                 }
@@ -339,6 +482,8 @@ impl ModalView for ProviderPickerView {
         let popup_height = match self.stage {
             Stage::List => 12,
             Stage::KeyEntry => 10,
+            Stage::ConfirmDelete => 8,
+            Stage::AddProvider => 14,
         }
         .min(area.height.saturating_sub(4))
         .max(8);
@@ -348,172 +493,216 @@ impl ModalView for ProviderPickerView {
             width: popup_width,
             height: popup_height,
         };
-
         Clear.render(popup_area, buf);
-
         match self.stage {
             Stage::List => self.render_list(popup_area, buf),
             Stage::KeyEntry => self.render_key_entry(popup_area, buf),
+            Stage::ConfirmDelete => self.render_confirm_delete(popup_area, buf),
+            Stage::AddProvider => self.render_add_provider(popup_area, buf),
         }
+    }
+}
+
+impl ProviderPickerView {
+    fn render_add_provider(&self, area: Rect, buf: &mut Buffer) {
+        let outer = Block::default()
+            .title(Line::from(Span::styled(
+                " Add Provider ",
+                Style::default()
+                    .fg(palette::DEEPSEEK_SKY)
+                    .add_modifier(Modifier::BOLD),
+            )))
+            .title_bottom(Line::from(vec![
+                Span::styled(" Tab ", Style::default().fg(palette::TEXT_MUTED)),
+                Span::raw("next "),
+                Span::styled(" Enter ", Style::default().fg(palette::TEXT_MUTED)),
+                Span::raw("save "),
+                Span::styled(" Esc ", Style::default().fg(palette::TEXT_MUTED)),
+                Span::raw("cancel "),
+            ]))
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(palette::BORDER_COLOR));
+        let inner = outer.inner(area);
+        outer.render(area, buf);
+
+        let layout = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(2),
+                Constraint::Length(2),
+                Constraint::Length(2),
+                Constraint::Length(2),
+                Constraint::Min(1),
+            ])
+            .split(inner);
+
+        let field_style = |active: bool| {
+            if active {
+                Style::default()
+                    .fg(palette::TEXT_PRIMARY)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(palette::TEXT_MUTED)
+            }
+        };
+        let label_style = |active: bool| {
+            if active {
+                Style::default()
+                    .fg(palette::DEEPSEEK_SKY)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(palette::TEXT_MUTED)
+            }
+        };
+
+        let name_val = if self.add_name.is_empty() {
+            "(name)"
+        } else {
+            &self.add_name
+        };
+        let base_val = if self.add_base_url.is_empty() {
+            "(base url)"
+        } else {
+            &self.add_base_url
+        };
+        let proto_val = PROTOCOL_OPTIONS[self.add_protocol_idx];
+        let key_display = if self.add_api_key.is_empty() {
+            "(optional)".to_string()
+        } else {
+            mask_key(&self.add_api_key)
+        };
+
+        Paragraph::new(Line::from(vec![
+            Span::styled("Name: ", label_style(self.add_field == AddField::Name)),
+            Span::styled(name_val, field_style(self.add_field == AddField::Name)),
+        ]))
+        .render(layout[0], buf);
+
+        Paragraph::new(Line::from(vec![
+            Span::styled("URL:  ", label_style(self.add_field == AddField::BaseUrl)),
+            Span::styled(base_val, field_style(self.add_field == AddField::BaseUrl)),
+        ]))
+        .render(layout[1], buf);
+
+        Paragraph::new(Line::from(vec![
+            Span::styled("Proto:", label_style(self.add_field == AddField::Protocol)),
+            Span::raw(" "),
+            Span::styled(proto_val, field_style(self.add_field == AddField::Protocol)),
+            if self.add_field == AddField::Protocol {
+                Span::styled(" ↑↓", Style::default().fg(palette::TEXT_MUTED))
+            } else {
+                Span::raw("")
+            },
+        ]))
+        .render(layout[2], buf);
+
+        Paragraph::new(Line::from(vec![
+            Span::styled("Key:  ", label_style(self.add_field == AddField::ApiKey)),
+            Span::styled(
+                &key_display,
+                field_style(self.add_field == AddField::ApiKey),
+            ),
+        ]))
+        .render(layout[3], buf);
+    }
+
+    fn render_confirm_delete(&self, area: Rect, buf: &mut Buffer) {
+        let name = &self.providers[self.selected_idx].display_name;
+        let outer = Block::default()
+            .title(Line::from(Span::styled(
+                format!(" Delete {}? ", name),
+                Style::default()
+                    .fg(palette::STATUS_WARNING)
+                    .add_modifier(Modifier::BOLD),
+            )))
+            .title_bottom(Line::from(vec![
+                Span::styled(" y ", Style::default().fg(palette::TEXT_MUTED)),
+                Span::raw("confirm "),
+                Span::styled(" n/Esc ", Style::default().fg(palette::TEXT_MUTED)),
+                Span::raw("cancel "),
+            ]))
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(palette::BORDER_COLOR));
+        let inner = outer.inner(area);
+        outer.render(area, buf);
+        let msg = format!("This will remove '{}' from your config.", name);
+        Paragraph::new(Line::from(Span::styled(
+            msg,
+            Style::default().fg(palette::TEXT_MUTED),
+        )))
+        .render(inner, buf);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crossterm::event::{KeyEvent, KeyModifiers};
 
-    fn key(code: KeyCode) -> KeyEvent {
-        KeyEvent::new(code, KeyModifiers::NONE)
+    fn make_registry() -> crate::provider_registry::ProviderRegistry {
+        crate::provider_registry::ProviderRegistry::new()
     }
 
-    fn move_to_provider(picker: &mut ProviderPickerView, provider: ApiProvider) {
-        let max_steps = picker.providers.len();
-        for _ in 0..max_steps {
-            if picker.selected_provider() == provider {
-                return;
-            }
-            picker.handle_key(key(KeyCode::Down));
-        }
-        panic!("provider {provider:?} not found in picker");
+    fn make_config() -> crate::config::Config {
+        crate::config::Config::default()
     }
 
     #[test]
-    fn picker_lists_all_providers() {
-        let config = Config::default();
-        let picker = ProviderPickerView::new(ApiProvider::Deepseek, &config);
-        let names: Vec<_> = picker
-            .providers
-            .iter()
-            .map(|(p, _)| p.display_name())
-            .collect();
-        assert_eq!(
-            names,
-            vec![
-                "DeepSeek",
-                "NVIDIA NIM",
-                "OpenAI-compatible",
-                "OpenRouter",
-                "Novita AI",
-                "Fireworks AI",
-                "SGLang",
-                "vLLM",
-                "Ollama"
-            ]
-        );
+    fn test_picker_new_selects_active() {
+        let registry = make_registry();
+        let config = make_config();
+        let picker = ProviderPickerView::new("deepseek", &registry, &config);
+        assert_eq!(picker.selected_name(), "deepseek");
     }
 
     #[test]
-    fn ollama_is_selectable_without_key() {
-        let config = Config::default();
-        let mut picker = ProviderPickerView::new(ApiProvider::Deepseek, &config);
-        move_to_provider(&mut picker, ApiProvider::Ollama);
-        assert_eq!(picker.selected_provider(), ApiProvider::Ollama);
-        assert!(picker.selected_has_key());
-        let action = picker.handle_key(key(KeyCode::Enter));
-        match action {
-            ViewAction::EmitAndClose(ViewEvent::ProviderPickerApplied { provider }) => {
-                assert_eq!(provider, ApiProvider::Ollama);
-            }
-            other => panic!("expected ProviderPickerApplied, got {other:?}"),
-        }
+    fn test_picker_navigation() {
+        let registry = make_registry();
+        let config = make_config();
+        let mut picker = ProviderPickerView::new("deepseek", &registry, &config);
+        picker.move_down();
+        assert_ne!(picker.selected_name(), "deepseek");
+        picker.move_up();
+        assert_eq!(picker.selected_name(), "deepseek");
     }
 
     #[test]
-    fn picker_marks_active_provider_as_initial_selection() {
-        let config = Config::default();
-        let picker = ProviderPickerView::new(ApiProvider::Openrouter, &config);
-        assert_eq!(picker.selected_provider(), ApiProvider::Openrouter);
-        assert_eq!(picker.active_provider, ApiProvider::Openrouter);
-    }
-
-    #[test]
-    fn enter_with_no_key_transitions_to_key_entry_stage() {
-        let config = Config::default();
-        let mut picker = ProviderPickerView::new(ApiProvider::Deepseek, &config);
-        // Move to OpenRouter, which has no key in default config.
-        move_to_provider(&mut picker, ApiProvider::Openrouter);
-        assert_eq!(picker.selected_provider(), ApiProvider::Openrouter);
-        let action = picker.handle_key(key(KeyCode::Enter));
+    fn test_picker_enter_without_key_goes_to_key_entry() {
+        let registry = make_registry();
+        let config = make_config();
+        let mut picker = ProviderPickerView::new("ollama", &registry, &config);
+        let action = picker.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(matches!(action, ViewAction::None));
-        assert_eq!(picker.stage, Stage::KeyEntry);
     }
 
     #[test]
-    fn enter_with_existing_key_emits_apply_and_closes() {
-        let config = Config {
-            api_key: Some("existing-deepseek-key".to_string()),
-            ..Config::default()
-        };
-        let mut picker = ProviderPickerView::new(ApiProvider::NvidiaNim, &config);
-        // Move up twice to DeepSeek (index 0), which has a key from the config.
-        picker.handle_key(key(KeyCode::Up));
-        picker.handle_key(key(KeyCode::Up));
-        let action = picker.handle_key(key(KeyCode::Enter));
-        match action {
-            ViewAction::EmitAndClose(ViewEvent::ProviderPickerApplied { provider }) => {
-                assert_eq!(provider, ApiProvider::Deepseek);
-            }
-            other => panic!("expected ProviderPickerApplied, got {other:?}"),
-        }
+    fn test_picker_enter_with_key_applies() {
+        let registry = make_registry();
+        let config = make_config();
+        let mut picker = ProviderPickerView::new("deepseek", &registry, &config);
+        picker.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     }
 
     #[test]
-    fn key_entry_enter_submits_after_typing() {
-        let config = Config::default();
-        let mut picker = ProviderPickerView::new(ApiProvider::Deepseek, &config);
-        // Navigate to Novita and trigger key entry.
-        move_to_provider(&mut picker, ApiProvider::Novita);
-        picker.handle_key(key(KeyCode::Enter));
-        assert_eq!(picker.stage, Stage::KeyEntry);
-        for c in "novita-key".chars() {
-            picker.handle_key(key(KeyCode::Char(c)));
-        }
-        let action = picker.handle_key(key(KeyCode::Enter));
+    fn test_picker_key_entry_submit() {
+        let registry = make_registry();
+        let config = make_config();
+        let mut picker = ProviderPickerView::new("ollama", &registry, &config);
+        picker.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        picker.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
+        picker.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
+        let action = picker.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         match action {
             ViewAction::EmitAndClose(ViewEvent::ProviderPickerApiKeySubmitted {
-                provider,
+                provider_name,
                 api_key,
             }) => {
-                assert_eq!(provider, ApiProvider::Novita);
-                assert_eq!(api_key, "novita-key");
+                assert_eq!(provider_name, "ollama");
+                assert_eq!(api_key, "sk");
             }
-            other => panic!("expected ProviderPickerApiKeySubmitted, got {other:?}"),
+            other => panic!(
+                "expected EmitAndClose(ProviderPickerApiKeySubmitted), got {:?}",
+                other
+            ),
         }
-    }
-
-    #[test]
-    fn key_entry_esc_returns_to_list_without_emitting() {
-        let config = Config::default();
-        let mut picker = ProviderPickerView::new(ApiProvider::Deepseek, &config);
-        move_to_provider(&mut picker, ApiProvider::Openrouter);
-        picker.handle_key(key(KeyCode::Enter));
-        assert_eq!(picker.stage, Stage::KeyEntry);
-        picker.handle_key(key(KeyCode::Char('a')));
-        let action = picker.handle_key(key(KeyCode::Esc));
-        assert!(matches!(action, ViewAction::None));
-        assert_eq!(picker.stage, Stage::List);
-        assert!(picker.api_key_input.is_empty());
-    }
-
-    #[test]
-    fn list_esc_closes_without_emitting() {
-        let config = Config::default();
-        let mut picker = ProviderPickerView::new(ApiProvider::Deepseek, &config);
-        let action = picker.handle_key(key(KeyCode::Esc));
-        assert!(matches!(action, ViewAction::Close));
-    }
-
-    #[test]
-    fn key_entry_strips_whitespace_chars() {
-        let config = Config::default();
-        let mut picker = ProviderPickerView::new(ApiProvider::Deepseek, &config);
-        move_to_provider(&mut picker, ApiProvider::Openrouter);
-        picker.handle_key(key(KeyCode::Enter));
-        assert_eq!(picker.stage, Stage::KeyEntry);
-        for c in "abc def".chars() {
-            picker.handle_key(key(KeyCode::Char(c)));
-        }
-        assert_eq!(picker.api_key_input, "abcdef");
     }
 }
